@@ -1,0 +1,154 @@
+"""Web chat (the dashboard's test chat and the embeddable widget): save the message and answer synchronously."""
+
+import logging
+import json
+import uuid
+from datetime import datetime, timezone
+
+from maia.inbound.reply import reply_to_message
+from maia.utils.read_word import read_word_by_pages
+from maia.inbound.save.common import (
+    SaveResponse,
+    get_or_create_chat_settings,
+    ensure_thread_id_in_conversation,
+    extract_text_from_media,
+    get_or_create_conversation_for_thread_id,
+    handle_audio_message,
+    update_conversation_profile_name,
+    update_customer_status_on_unsubscribe,
+)
+from maia.models.customers import CustomerDocument
+from maia.models.messages import MessageDocument
+from maia.models.tenants import TenantDocument
+from maia.utils.google_cloud_storage.utils.save_fastapi_file_in_bucket import save_fastapi_file_in_bucket
+
+logger = logging.getLogger(__name__)
+
+
+async def save_web_input(form, tenant_name) -> SaveResponse:
+    """Save incoming message from Web API"""
+    file = form.get("file")
+    data = {}
+    for key in form.keys():
+        data[key] = form.get(key)
+    From = data.get("From", str(uuid.uuid4()))
+    media_url = data.get("MediaUrl", None)
+    message_type = data.get("MessageType", "text")
+    if file:
+        message_type, media_url = await save_fastapi_file_in_bucket(f"{tenant_name}/customers/{From}", file)
+
+    # Create message document
+    # Handeling incoming message
+    tenant = TenantDocument.objects(name=tenant_name).first()
+    if not tenant:
+        raise ValueError(f"Tenant {tenant_name} not found")
+    if tenant.status == "inactive":
+        raise ValueError(f"Tenant {tenant_name} is inactive")
+    customer = create_or_get_customer(From, tenant_name)
+    body_message = data.get("Body", "")
+    if transcoded_audio := handle_audio_message(media_url, message_type, tenant_name):
+        body_message = transcoded_audio
+    chat_settings = get_or_create_chat_settings(tenant_name)
+    pages = []
+    if (
+        (form.get("MediaContentType0", "") == "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        or message_type == "docx"
+    ) and customer.meta_data.get("read_text_by_page"):
+        pages = read_word_by_pages(media_url)
+
+    media_text = extract_text_from_media(media_url, message_type, form.get("MediaContentType0", ""), chat_settings)
+    if media_text:
+        body_message += f"\n\n{media_text}"
+    # Handle the reply modes
+    if customer.reply_mode == "blocked":
+        return SaveResponse()
+
+    # Resolve conversation_id by threadId if the customer has follow_thread_conversation enabled
+    thread_id = data.get("threadId")
+    resolved_conversation_id = None
+    if thread_id and customer.get_meta_data_field("follow_thread_conversation", False):
+        resolved_conversation_id = get_or_create_conversation_for_thread_id(
+            tenant_name, customer.phone_number, "web", thread_id
+        )
+
+    msg = MessageDocument(
+        tenant_name=tenant_name,
+        platform="web",
+        phone_number=customer.phone_number,
+        sender_id=str(customer.id),
+        profile_name=customer.name,
+        message=body_message,
+        role="user",
+        to="bot",
+        msg_type=message_type,
+        media_url=media_url,
+        sid=str(uuid.uuid4()),
+        message_sids=[],
+        date=datetime.now(timezone.utc),
+        conversation_id=resolved_conversation_id if resolved_conversation_id else None,
+        meta_data={"thread_id": thread_id},
+    )
+    msg.save()  # Save the message to database
+    if thread_id and customer.get_meta_data_field("follow_thread_conversation", False):
+        ensure_thread_id_in_conversation(msg.conversation_id, thread_id)
+    update_conversation_profile_name(tenant_name, customer.phone_number, customer.name, msg.conversation_id)
+    if pages:
+        for i, page_text in enumerate(pages, 1):
+            logger.info(f"Page {i}:\n{page_text}\n")
+            # create message for each page and send reply_to_message
+            page_msg = MessageDocument(
+                tenant_name=tenant_name,
+                platform="web",
+                phone_number=customer.phone_number,
+                sender_id=str(customer.id),
+                profile_name=customer.name,
+                message=page_text,
+                role="user",
+                to="bot",
+                msg_type="text",
+                media_url=media_url,
+                sid=str(uuid.uuid4()),
+                message_sids=[],
+                date=datetime.now(timezone.utc),
+                conversation_id=msg.conversation_id,
+                meta_data={"page_number": i, "total_pages": len(pages), "thread_id": thread_id},
+            )
+            page_msg = page_msg.save()
+            await reply_to_message(
+                tenant_name=tenant_name,
+                user_id=customer.phone_number,
+                task_message_id=str(page_msg.id),
+                single_message_mode=True,
+                conversation_id=page_msg.conversation_id,
+            )
+        return SaveResponse()
+    if not body_message:
+        logger.info("Empty message, not processing further")
+        try:
+            logger.info(json.dumps(data, indent=4, ensure_ascii=False))
+        except Exception:
+            logger.error(data)
+    if update_customer_status_on_unsubscribe(body_message, customer):
+        return SaveResponse()
+    return SaveResponse(
+        tenant_name=tenant_name,
+        user_id=customer.phone_number,
+        delay=0,
+        task_message_id=str(msg.id),
+        conversation_id=msg.conversation_id,
+    )
+
+
+def create_or_get_customer(from_number, tenant_name):
+    chat_id = from_number
+    customer = CustomerDocument.objects(phone_number=chat_id, tenant_name=tenant_name).first()
+    if not customer:
+        customer = CustomerDocument(
+            tenant_name=tenant_name,
+            phone_number=chat_id,
+            name=chat_id,
+            created_date=datetime.now(timezone.utc).replace(microsecond=0),
+        )
+        customer.save()
+        customer.reload()
+    return customer
