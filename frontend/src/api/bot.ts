@@ -1,0 +1,125 @@
+import { api } from './client'
+
+const enc = encodeURIComponent
+
+// ---------- Prompts ----------
+
+export interface Prompt {
+  id?: string
+  name: string
+  tenant_name: string
+  /** The prompt text (the backend exposes it as both `prompt` and `content`). */
+  prompt?: string | null
+  content?: string | null
+  label?: string | null
+  prompt_type?: 'text' | 'structured' | null
+  modified_at?: string | null
+  modified_by?: string | null
+}
+
+export interface PromptHistoryEntry {
+  name: string
+  tenant_name: string
+  content?: string | null
+  prompt_type?: string
+  modified_at?: string | null
+  modified_by?: string | null
+}
+
+/** Prompt names the UI edits; everything else (RAG internals) stays hidden. */
+export const CHAT_PROMPT = 'default'
+export const PHONE_PROMPT = 'platform_realtime'
+
+export async function listPrompts(tenant: string): Promise<Prompt[]> {
+  const { data } = await api.get<Prompt[]>(`/management/v1/prompts/${enc(tenant)}`)
+  return data
+}
+
+export async function updatePromptText(tenant: string, name: string, content: string): Promise<Prompt> {
+  const { data } = await api.put<Prompt>(`/management/v1/prompts/${enc(tenant)}/${enc(name)}`, {
+    name,
+    tenant_name: tenant,
+    content,
+    prompt_type: 'text',
+  })
+  return data
+}
+
+export async function createPromptText(tenant: string, name: string, content: string): Promise<Prompt> {
+  const { data } = await api.post<Prompt>('/management/v1/prompts', {
+    name,
+    tenant_name: tenant,
+    content,
+    prompt_type: 'text',
+  })
+  return data
+}
+
+export async function listPromptHistory(tenant: string): Promise<PromptHistoryEntry[]> {
+  const { data } = await api.get<PromptHistoryEntry[]>(`/management/v1/prompts/history/${enc(tenant)}`)
+  return data
+}
+
+// ---------- Agent (model settings) ----------
+
+export interface Agent {
+  id: string
+  tenant_name: string
+  name: string
+  description: string
+  is_active: boolean
+  model: string
+  provider: string
+  temperature: number
+  score_threshold: number
+  top_k_general: number
+  top_k_qa: number
+  direct_answer_threshold: number
+  created_at?: number
+  updated_at?: number
+}
+
+export type AgentInput = Omit<Agent, 'id' | 'tenant_name' | 'created_at' | 'updated_at'>
+
+export async function listAgents(tenant: string): Promise<Agent[]> {
+  const { data } = await api.get<Agent[]>('/management/v1/agents/', { params: { tenant_name: tenant } })
+  return data
+}
+
+export async function updateAgent(agentId: string, input: AgentInput): Promise<Agent> {
+  const { data } = await api.put<Agent>(`/management/v1/agents/${enc(agentId)}`, input)
+  return data
+}
+
+export async function createAgent(tenant: string, input: AgentInput): Promise<Agent> {
+  const { data } = await api.post<Agent>('/management/v1/agents/', input, { params: { tenant_name: tenant } })
+  return data
+}
+
+export const PROVIDERS = ['openai', 'anthropic', 'google'] as const
+
+export const MODEL_SUGGESTIONS: Record<string, string[]> = {
+  openai: ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'gpt-4o', 'gpt-4o-mini', 'gpt-5', 'gpt-5-mini', 'gpt-5-nano'],
+  anthropic: ['claude-sonnet-4-5', 'claude-haiku-4-5', 'claude-opus-4-1'],
+  google: ['gemini-2.5-pro', 'gemini-2.5-flash'],
+}
+
+// ---------- Test chat (web channel, same pipeline as the real channels) ----------
+
+export interface TestChatReply {
+  message?: string | null
+  tool_call?: unknown[]
+}
+
+/** Sends one message through the web channel and returns the bot's answer synchronously. */
+export async function sendTestMessage(tenant: string, from: string, body: string): Promise<TestChatReply> {
+  const form = new FormData()
+  form.append('From', from)
+  form.append('Body', body)
+  form.append('ProfileName', 'בדיקה')
+  const { data } = await api.post<TestChatReply>(`/api/async/web/${enc(tenant)}`, form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120_000,
+  })
+  return data
+}
