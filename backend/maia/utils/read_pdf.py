@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def _load_pdf_bytes(file_path_or_url: str) -> bytes:
+    """Bytes of a PDF from a URL or a local path."""
     if file_path_or_url.startswith(("http://", "https://")):
         response = requests.get(file_path_or_url, timeout=120)
         response.raise_for_status()

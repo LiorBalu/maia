@@ -67,6 +67,7 @@ class QADocument(Document):
     }
 
     def save(self, *args, **kwargs):
+        """Stamp created_at / updated_at and normalize the category."""
         if not self.created_at:
             self.created_at = datetime.utcnow()
         self.updated_at = datetime.utcnow()

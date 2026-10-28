@@ -6,6 +6,7 @@ from maia.models.conversations import Conversation
 
 
 def _get_conversation(tenant_name: str, phone_number: str):
+    """The customer's online telephone conversation, or the latest telephone one."""
     from maia.models.conversations import online_conversation_filter
 
     # Call stats belong to the telephone conversation; when the tenant splits platforms, target it

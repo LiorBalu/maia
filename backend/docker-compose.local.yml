@@ -1,0 +1,164 @@
+name: maia
+
+networks:
+  backend_network:
+    driver: bridge
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: maia-mongodb
+    ports:
+      - "27017:27017"
+    networks:
+      - backend_network
+    volumes:
+      - mongodb-data:/data/db
+      - mongodb-config:/data/configdb
+    environment:
+      - MONGO_INITDB_DATABASE=maia
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis-stack:
+    image: redis/redis-stack:latest
+    ports:
+      - "6379:6379"  # Redis
+    networks:
+      - backend_network
+    volumes:
+      - redis-data:/data
+    environment:
+      - REDIS_ARGS=--save 60 1000
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: maia-qdrant
+    ports:
+      - "6333:6333"  # REST API
+      - "6334:6334"  # gRPC API
+    networks:
+      - backend_network
+    volumes:
+      - qdrant-data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 5 bash -c '</dev/tcp/localhost/6333' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "8000:8000"  # API
+      - "5678:5678"  # Debugger
+    networks:
+      - backend_network
+    volumes:
+      - .:/app:cached
+    env_file:
+      - .env
+    environment:
+      - PORT=8000
+      - REDIS_URL=redis://redis-stack:6379/0
+      - MONGO_URI=mongodb://mongodb:27017/
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - RELOAD_MODE=true
+      - PYDEVD_DISABLE_FILE_VALIDATION=1
+      - PYDEVD_WARN_EVALUATION_TIMEOUT=5
+      - PYDEVD_UNBLOCK_THREADS_TIMEOUT=5
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+    command: >
+      python -Xfrozen_modules=off
+      -m debugpy --listen 0.0.0.0:5678 --configure-subProcess true --configure-qt none
+      -m uvicorn main:app --host 0.0.0.0 --port 8000
+      --reload --reload-delay 0.5 --use-colors
+      --reload-dir /app
+      --reload-exclude .git
+      --reload-exclude __pycache__
+      --reload-exclude .venv
+      --reload-exclude venv
+      --reload-exclude node_modules
+      --reload-exclude call_logs
+    depends_on:
+      redis-stack:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    restart: unless-stopped
+
+  celery:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    networks:
+      - backend_network
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis-stack:6379/0
+      - MONGO_URI=mongodb://mongodb:27017/
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+    command: celery -A background_tasks worker --loglevel=info
+    depends_on:
+      redis-stack:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    restart: unless-stopped
+
+  reply-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    networks:
+      - backend_network
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis-stack:6379/0
+      - MONGO_URI=mongodb://mongodb:27017/
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+    command: arq workers.reply_worker.WorkerSettings
+    depends_on:
+      redis-stack:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  mongodb-data:
+  mongodb-config:
+  qdrant-data:

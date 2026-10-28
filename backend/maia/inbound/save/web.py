@@ -10,12 +10,9 @@ from maia.utils.read_word import read_word_by_pages
 from maia.inbound.save.common import (
     SaveResponse,
     get_or_create_chat_settings,
-    ensure_thread_id_in_conversation,
     extract_text_from_media,
-    get_or_create_conversation_for_thread_id,
     handle_audio_message,
     update_conversation_profile_name,
-    update_customer_status_on_unsubscribe,
 )
 from maia.models.customers import CustomerDocument
 from maia.models.messages import MessageDocument
@@ -63,14 +60,6 @@ async def save_web_input(form, tenant_name) -> SaveResponse:
     if customer.reply_mode == "blocked":
         return SaveResponse()
 
-    # Resolve conversation_id by threadId if the customer has follow_thread_conversation enabled
-    thread_id = data.get("threadId")
-    resolved_conversation_id = None
-    if thread_id and customer.get_meta_data_field("follow_thread_conversation", False):
-        resolved_conversation_id = get_or_create_conversation_for_thread_id(
-            tenant_name, customer.phone_number, "web", thread_id
-        )
-
     msg = MessageDocument(
         tenant_name=tenant_name,
         platform="web",
@@ -85,12 +74,8 @@ async def save_web_input(form, tenant_name) -> SaveResponse:
         sid=str(uuid.uuid4()),
         message_sids=[],
         date=datetime.now(timezone.utc),
-        conversation_id=resolved_conversation_id if resolved_conversation_id else None,
-        meta_data={"thread_id": thread_id},
     )
     msg.save()  # Save the message to database
-    if thread_id and customer.get_meta_data_field("follow_thread_conversation", False):
-        ensure_thread_id_in_conversation(msg.conversation_id, thread_id)
     update_conversation_profile_name(tenant_name, customer.phone_number, customer.name, msg.conversation_id)
     if pages:
         for i, page_text in enumerate(pages, 1):
@@ -111,7 +96,7 @@ async def save_web_input(form, tenant_name) -> SaveResponse:
                 message_sids=[],
                 date=datetime.now(timezone.utc),
                 conversation_id=msg.conversation_id,
-                meta_data={"page_number": i, "total_pages": len(pages), "thread_id": thread_id},
+                meta_data={"page_number": i, "total_pages": len(pages)},
             )
             page_msg = page_msg.save()
             await reply_to_message(
@@ -128,8 +113,6 @@ async def save_web_input(form, tenant_name) -> SaveResponse:
             logger.info(json.dumps(data, indent=4, ensure_ascii=False))
         except Exception:
             logger.error(data)
-    if update_customer_status_on_unsubscribe(body_message, customer):
-        return SaveResponse()
     return SaveResponse(
         tenant_name=tenant_name,
         user_id=customer.phone_number,
@@ -140,6 +123,7 @@ async def save_web_input(form, tenant_name) -> SaveResponse:
 
 
 def create_or_get_customer(from_number, tenant_name):
+    """The customer of a web chat, keyed by the From field (a uuid for the dashboard chat); created when missing."""
     chat_id = from_number
     customer = CustomerDocument.objects(phone_number=chat_id, tenant_name=tenant_name).first()
     if not customer:

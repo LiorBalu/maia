@@ -12,6 +12,9 @@ from maia.utils.google_cloud_storage.public import upload_to_gcs
 
 def save_file_url_in_bucket(tenant_name: str, media_url: str, content_type: str) -> str:
     # Extract the main content type by splitting on ';' to handle cases like "audio/ogg; codecs=opus"
+    """Download a media URL (with the WAHA API key for WAHA links) and upload it to the tenant's folder under a
+    timestamped name whose extension matches the content type; returns the public URL.
+    """
     main_content_type = content_type.split(";")[0].strip()
 
     media_file = None

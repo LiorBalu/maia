@@ -15,7 +15,9 @@ logger = logging.getLogger(__name__)
 
 # Custom JSON encoder for datetime objects
 class DateTimeEncoder(json.JSONEncoder):
+    """JSON encoder that writes datetimes as ISO strings."""
     def default(self, obj):
+        """Serialize datetimes; defer to json for anything else."""
         if isinstance(obj, datetime):
             return obj.isoformat()
         return super().default(obj)
@@ -29,6 +31,9 @@ class RedisSSEManager:
 
     def __init__(self, redis_url: str = None):
         # Use the same Redis URL as Celery
+        """Prepare the Redis URL, the key names and a unique instance id; the connection itself is opened in
+        initialize().
+        """
         self.redis_url = redis_url or getenv("REDIS_URL", "redis://localhost:6379/0")
         self.redis: Optional[aioredis.Redis] = None
         self.pubsub: Optional[aioredis.client.PubSub] = None

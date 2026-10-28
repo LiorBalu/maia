@@ -3,6 +3,7 @@
 import requests
 
 def read_txt(filename: str) -> str:
+    """Text of a UTF-8 file (URL or path)."""
     if filename.startswith("http://") or filename.startswith("https://"):
         response = requests.get(filename)
         response.raise_for_status()

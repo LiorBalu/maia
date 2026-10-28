@@ -3,11 +3,9 @@
 import asyncio
 import json
 import logging
-import time
 from os import getenv
-from typing import Dict, Literal, Optional, Tuple
+from typing import Literal, Optional
 
-import httpx
 from arq.connections import ArqRedis
 from fastapi import APIRouter, File, Form, Path, Request, UploadFile
 from fastapi.responses import PlainTextResponse
@@ -22,63 +20,7 @@ from maia.models.tenants import TenantDocument
 
 router = APIRouter()
 
-# ---------------------------------------------------------------------------
-# Dev-mode forwarding helpers
-# ---------------------------------------------------------------------------
-# Simple in-memory TTL cache: { tenant_name: (dev_url | None, timestamp) }
-# Avoids a MongoDB round-trip on every incoming webhook.
-_dev_url_cache: Dict[str, Tuple[Optional[str], float]] = {}
-_DEV_URL_CACHE_TTL = 60.0  # seconds
-
 logger = logging.getLogger("chat_routes")
-
-
-def _get_dev_url_for_tenant_sync(tenant_name: str) -> Optional[str]:
-    """
-    Return the dev_url if the tenant status is 'development', else None.
-    Result is cached for _DEV_URL_CACHE_TTL seconds to minimise DB hits.
-    """
-    now = time.monotonic()
-    cached = _dev_url_cache.get(tenant_name)
-    if cached is not None:
-        dev_url, ts = cached
-        if now - ts < _DEV_URL_CACHE_TTL:
-            return dev_url
-
-    try:
-        tenant = TenantDocument.objects(name=tenant_name).only("status", "dev_url").first()
-        dev_url = tenant.dev_url if (tenant and tenant.status in ("development", "developer") and tenant.dev_url) else None
-    except Exception as exc:
-        logger.error(f"[DEV] Error fetching dev_url for tenant '{tenant_name}': {exc}")
-        dev_url = None
-
-    _dev_url_cache[tenant_name] = (dev_url, now)
-    return dev_url
-
-
-async def _forward_to_dev_server(
-    dev_url: str, platform: str, tenant_name: str, body: bytes, content_type: str
-) -> Optional[str]:
-    """
-    Forward the raw webhook request to the dev server at the same path.
-    The dev server will save the message to its own DB and run generation
-    with its own code, exactly like a normal incoming webhook.
-    """
-    target_url = f"{dev_url.rstrip('/')}/api/async/{platform}/{tenant_name}"
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(target_url, content=body, headers={"content-type": content_type})
-            return response.text
-    except httpx.ConnectError:
-        logger.error(f"[DEV] Cannot connect to dev server at {target_url}")
-    except httpx.TimeoutException:
-        logger.error(f"[DEV] Timeout calling dev server at {target_url}")
-    except Exception as exc:
-        logger.error(f"[DEV] Unexpected error calling {target_url}: {exc}")
-    return None
-
-
-# ---------------------------------------------------------------------------
 
 
 HANDLER_PLATFORMS = {
@@ -108,10 +50,6 @@ async def webhook_for_tenant(
         default=None,
         description="JSON-encoded agent override configuration. Allows selecting a specific agent at call time.",
     ),
-    threadId: Optional[str] = Form(
-        default=None,
-        description="Thread or conversation identifier used to continue an existing conversation (platform-dependent).",
-    ),
     file: Optional[UploadFile] = File(None, description="Optional file attachment sent alongside the message."),
 ):
     """
@@ -129,12 +67,9 @@ async def webhook_for_tenant(
         From        – Sender address (phone number, email, etc.).
         To          – Recipient address.
         agent       – JSON-encoded agent override configuration.
-        threadId    – Thread/conversation identifier (used by some platforms).
         file        – Optional file attachment uploaded with the message.
 
     Always returns HTTP 200 to prevent webhook retry storms, even when an error occurs.
-    In production, if the target tenant is in development mode, the request is transparently
-    forwarded to the configured dev server instead of being processed locally.
     """
     return await _handle_message(fast_request=fast_request, platform=platform, tenant_name=tenant_name, agent=agent)
 
@@ -157,31 +92,18 @@ async def webhook_without_tenant(
     ),
     file: Optional[UploadFile] = File(None, description="Optional file attachment sent alongside the message."),
 ):
+    """The same webhook without a tenant in the path (Gmail push posts here: the tenant is resolved from the mailbox).
+    """
     return await _handle_message(fast_request=fast_request, platform=platform, tenant_name=None, agent=agent)
 
 
 async def _handle_message(fast_request: Request, platform: str, tenant_name: Optional[str], agent: Optional[str]):
+    """Read the body (form for web, JSON otherwise, 5 s timeout), save and dispatch the message, and always answer 200
+    (270 on body timeout / disconnect, 271 on error) so the platform never retries.
+    """
     request_start_time = asyncio.get_event_loop().time()
 
     try:
-        # --------------------------------------------------------------
-        # Dev-mode: forward the entire raw request to the dev server
-        # so it saves the message and generates with its own code.
-        # Only active in PRODUCTION environment.
-        # --------------------------------------------------------------
-        if tenant_name and getenv("MAIA_ENV", "DEVELOPMENT") == "PRODUCTION":
-            dev_url = _get_dev_url_for_tenant_sync(tenant_name)
-            if dev_url:
-                body = await fast_request.body()
-                content_type = fast_request.headers.get("content-type", "")
-                should_await = platform in ("web", "telephone")
-                if should_await:
-                    result = await _forward_to_dev_server(dev_url, platform, tenant_name, body, content_type)
-                    return PlainTextResponse(result or "", status_code=200)
-                else:
-                    asyncio.ensure_future(_forward_to_dev_server(dev_url, platform, tenant_name, body, content_type))
-                    return PlainTextResponse("", status_code=200)
-
         # Parse request body with timeout to prevent hanging connections
         try:
             if platform == "web":
@@ -195,7 +117,7 @@ async def _handle_message(fast_request: Request, platform: str, tenant_name: Opt
             logger.error(f"Client disconnected while reading body for {platform}/{tenant_name}")
             return PlainTextResponse("", status_code=270)
 
-        # Process message — dev routing happens inside process_message, after save
+        # Save the message, then generate the reply (inline or through ARQ)
         result = await process_message(platform=platform, tenant_name=tenant_name, agent=agent, request_body=request_body)
 
         # Log response time for monitoring
@@ -295,6 +217,9 @@ async def dispatch_reply(
 async def process_message(
     platform: str, request_body: any, tenant_name: Optional[str] = None, agent: Optional[dict] = None
 ):
+    """Save the inbound message with the platform's handler, then generate the reply: nothing when there is no one to
+    answer (outgoing, blocked, manual mode); through ARQ when USE_ARQ_WORKER is set, inline otherwise.
+    """
     save_response = await HANDLER_PLATFORMS[platform](request_body, tenant_name)
     sender_id = save_response.user_id
     delay = save_response.delay
@@ -353,9 +278,7 @@ async def process_message(
 def should_send_sync_response(platform, delay):
     #  if platform is whatsapp always false
     # email is always fire-and-forget regardless of delay
+    """Whether the webhook waits for the reply: web (and telephone) yes, email never, others only without a delay."""
     if platform == "email":
         return False
-    return (
-        platform in ["web", "telephone"] or delay == 0
-        # or getenv("ENV", "DEVELOPMENT") != "PRODUCTION"
-    )
+    return platform in ["web", "telephone"] or delay == 0

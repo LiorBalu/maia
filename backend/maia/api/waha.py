@@ -16,12 +16,14 @@ router = APIRouter(prefix="/waha", tags=["WAHA"])
 
 
 class WahaAccountRequest(BaseModel):
+    """Body of account creation: the WhatsApp number, an optional webhook URL and WAHA worker URL."""
     phone_number: str
     webhook_url: Optional[str] = None
     server_url: Optional[str] = None  # manual override; omitted = auto-dispatch to the next free worker
 
 
 class WahaAccountResponse(BaseModel):
+    """A WAHA account as the dashboard sees it: number, server, connection status and its history."""
     phone_number: str
     webhook_url: Optional[str] = None
     server_url: Optional[str] = None

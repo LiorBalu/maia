@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 
 class FeatureTenantModel(BaseModel):
+    """A tenant feature flag as the API sees it."""
     name: str
     enabled: bool = False
     meta_data: Dict = Field(default={})
@@ -17,6 +18,7 @@ class FeatureTenantModel(BaseModel):
 
 
 class FeatureTenant(EmbeddedDocument):
+    """A tenant feature flag stored in the tenant document (default_platform, call_auto_reset)."""
     name = StringField(required=True)
     enabled = BooleanField(default=False)
     meta_data = DictField(default={})

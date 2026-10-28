@@ -1,4 +1,4 @@
-"""Auth API: login, dashboard users (staff / partner / member), own profile, the OAuth2 token used by /docs."""
+"""Auth API: login, dashboard users (staff / member), own profile, the OAuth2 token used by /docs."""
 
 import logging
 from datetime import datetime, timedelta, timezone
@@ -14,10 +14,8 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from maia.models.users import User, UserDocument, UserRequest
 from maia.models.tenants import TenantDocument
 from maia.api.security import (
-    administrable_tenant_names,
     assert_can_administer_user,
     authenticate_user_token,
-    user_managed_tenant_names,
     verify_token_extended,
 )
 from maia.services.passwords import update_user_password
@@ -29,12 +27,9 @@ logger = logging.getLogger(__name__)
 
 @router.get("/users", responses={403: {"description": "User not authorized"}})
 async def get_users(u: User = Depends(authenticate_user_token)):
+    """List the dashboard users (staff only; 403 for anyone else)."""
     if u.is_staff:
         users = UserDocument.objects()
-    elif getattr(u, "is_partner", False):
-        # A partner only sees the members of the tenants he administers.
-        managed = user_managed_tenant_names(u)
-        users = UserDocument.objects(is_staff=False, tenants_name__in=managed) if managed else []
     else:
         raise HTTPException(status_code=403, detail="User not authorized")
 
@@ -50,6 +45,7 @@ async def get_users(u: User = Depends(authenticate_user_token)):
             return value
 
     def serialize_user(user):
+        """User document as a JSON-safe dict, without the password hash and the Mongo id."""
         user_dict = {key: value for key, value in user.to_mongo().to_dict().items() if key not in ["password", "_id"]}
         # Recursively convert datetime objects to ISO format strings
         return {key: serialize_value(value) for key, value in user_dict.items()}
@@ -88,15 +84,18 @@ def _user_document_fields(user: UserRequest) -> dict:
 
 @router.post("/register")
 async def create_user(
-    user: UserRequest, u: UserDocument = Security(verify_token_extended, scopes=["staff", "partner", "grant_access"])
+    user: UserRequest, u: UserDocument = Security(verify_token_extended, scopes=["staff", "grant_access"])
 ):
+    """Register a dashboard user (by staff or a member with grant_access): hash the password, link the user
+    to the requested tenants and return a JWT.
+    """
     _validate_new_user_payload(user)
 
     if user.tenants_name:
         tenants = TenantDocument.objects(name__in=user.tenants_name)
         if not tenants:
             raise HTTPException(status_code=404, detail="Tenant not found")
-    # A partner (or a member with grant_access) may only create plain members of his own tenants.
+    # A member with grant_access may only create plain members of their own tenants.
     requested_role = user.role or ("staff" if user.is_staff else None)
     assert_can_administer_user(u, list(user.tenants_name or []) + list((user.permissions or {}).keys()), requested_role)
     if not u.is_staff:
@@ -125,30 +124,26 @@ async def create_user(
 
 @router.delete("/users/{email}")
 async def delete_user(
-    email: str, u: UserDocument = Security(verify_token_extended, scopes=["staff", "partner", "grant_access"])
+    email: str, u: UserDocument = Security(verify_token_extended, scopes=["staff", "grant_access"])
 ):
+    """Delete a user by email (staff only)."""
     user_instance = UserDocument.objects(email=email.lower()).first()
     if not user_instance:
         raise HTTPException(status_code=404, detail="User not found")
     if not u.is_staff:
-        # A partner may remove plain members of the tenants he administers, nobody else.
-        allowed_tenants = administrable_tenant_names(u) or set()
-        is_own_member = bool(
-            set(user_instance.permissions or {}).intersection(allowed_tenants)
-            or set(user_instance.tenants_name or []).intersection(allowed_tenants)
-        )
-        if not u.is_partner or user_instance.is_staff or user_instance.is_partner or not is_own_member:
-            raise HTTPException(status_code=403, detail="User not authorized")
+        raise HTTPException(status_code=403, detail="User not authorized")
     user_instance.delete()
     return {"message": "User deleted"}
 
 
 class LoginRequest(BaseModel):
+    """Body of POST /login."""
     email: str
     password: str
 
 
 class UserProfileUpdateRequest(BaseModel):
+    """Body of PUT /profile: the fields a user may change on his own account."""
     name: Optional[str] = None
     phone_number: Optional[str] = None
     color: Optional[str] = None
@@ -203,6 +198,8 @@ async def login_email_password(user: LoginRequest):
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    """Sign a JWT with the given payload; it expires after ACCESS_TOKEN_EXPIRE_MINUTES unless expires_delta is given.
+    """
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
@@ -222,8 +219,7 @@ def _build_user_token_data(user_doc) -> dict:
     return {
         "sub": user_doc.email,
         "is_staff": user_doc.is_staff,
-        # "staff" | "partner" | "user". The list of tenants a partner administers is
-        # deliberately NOT embedded: it changes on every tenant creation and would go stale.
+        # "staff" | "user".
         "role": getattr(user_doc, "role", None) or ("staff" if user_doc.is_staff else "user"),
         "tenants": list(user_doc.tenants_name or []),
         "permissions": dict(user_doc.permissions or {}),
@@ -232,7 +228,7 @@ def _build_user_token_data(user_doc) -> dict:
 
 @router.post("/token", include_in_schema=False)
 async def get_token(form_data: OAuth2PasswordRequestForm = Depends()):
-    """OAuth2 password flow token endpoint — used by API docs UIs (Elements, RapiDoc)."""
+    """OAuth2 password flow token endpoint — used by the Swagger UI at /docs."""
     user_doc = UserDocument.objects(email=form_data.username.lower()).first()
     if not user_doc:
         raise HTTPException(

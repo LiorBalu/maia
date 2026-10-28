@@ -1,9 +1,12 @@
-"""Sends the bot's replies by email through the tenant's connected Gmail account (HTML, RTL for Hebrew, threads)."""
+"""Sends the bot's replies and the tenant's notification emails through its connected Gmail account (HTML, RTL for
+Hebrew, threads).
+"""
 
 import logging
 import base64
 import os
 import re
+from typing import Optional
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -58,8 +61,31 @@ def wrap_with_html(text: str, direction: str = "auto") -> str:
     return html_content
 
 
+def send_tenant_email(tenant_name: str, to: str, subject: str, html_body: str) -> Optional[dict]:
+    """Send an HTML email from the tenant's connected Gmail account (the default one, else any). Returns the Gmail
+    response, or None when the tenant has no connected account (the notification is then only logged).
+    """
+    account = (
+        GoogleShared.objects(tenant_name=tenant_name, default=True).first()
+        or GoogleShared.objects(tenant_name=tenant_name).first()
+    )
+    if account is None:
+        logger.info("No Google account connected to %s: email to %s (%s) not sent", tenant_name, to, subject)
+        return None
+    service = get_email_service(account.access_token, account.refresh_token)
+    message = MIMEText(html_body, "html", "utf-8")
+    message["To"] = to
+    message["Subject"] = subject
+    body = {"raw": base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")}
+    return service.users().messages().send(userId="me", body=body).execute()
+
+
 class EmailPlatformService:
+    """Sender of the email channel: sends through the tenant's connected Gmail account. It implements the same
+    send_whatsapp_message interface the pipeline calls for every platform.
+    """
     def __init__(self, tenant_name: str, **kwargs) -> None:
+        """Load the tenant's Google account and build the Gmail client."""
         logger.info(" ".join(str(part) for part in ("EmailPlatformService", tenant_name)))
         _platform = GoogleShared.objects(tenant_name=tenant_name).first()
         self.email = _platform.email
@@ -68,6 +94,9 @@ class EmailPlatformService:
         self._service = get_email_service(self._access_token, self._refresh_token)
 
     def send_whatsapp_message(self, phone_number: str, message: str, **kwargs) -> dict:
+        """Send the reply as an HTML email (RTL when it contains Hebrew), inside the Gmail thread when thread_id /
+        message_id are given; returns {sid, thread_id}.
+        """
         thread_id = kwargs.get("thread_id")
         message_id = kwargs.get("message_id")
         subject = kwargs.get("subject", "")
@@ -116,6 +145,7 @@ class EmailPlatformService:
 
     def send_whatsapp_file(self, phone_number: str, message: str, media_url: str, **kwargs) -> dict:
         # Always send as HTML to ensure proper text direction
+        """Send an email that references a media URL (kept for the sender interface)."""
         direction = "rtl" if contains_hebrew(message) else "ltr"
         message_content = wrap_with_html(message, direction=direction)
 

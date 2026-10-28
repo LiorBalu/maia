@@ -19,7 +19,7 @@ connect(DB_NAME, host=getenv("MONGO_URI", "mongodb://localhost:27017"))
 
 manager_engine: AIOEngine = AIOEngine(
     client=client_mongo, database=DB_NAME
-)  # todo change this
+)
 mongo_client: MongoClient = MongoClient(
     getenv("MONGO_URI", "mongodb://localhost:27017")
 )
@@ -49,6 +49,7 @@ class MongoService:
     """
 
     def __init__(self, db_name, client: Optional[MongoClient] = None):
+        """Open a MongoClient on MONGO_URI (or use the given client) and select the database."""
         mongo_str = MONGO_URI
         if not mongo_str:
             mongo_str = "mongodb://localhost:27017/"

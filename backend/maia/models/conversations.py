@@ -1,4 +1,4 @@
-"""A conversation = one customer on one platform in one tenant; tags, notes, online/offline status, SSE broadcast of updates."""
+"""A conversation = one customer on one platform in one tenant; notes, online/offline status, SSE broadcast of updates."""
 
 import logging
 from datetime import datetime, timedelta, timezone
@@ -34,37 +34,34 @@ def _get_redis_broadcast_client():
     return _get_redis_broadcast_client._client
 
 
-class Tag(EmbeddedDocument):
-    name = StringField(required=True)
-    color = StringField(required=True, default="#e5e7eb")
-
-
 class Note(EmbeddedDocument):
+    """A manager note attached to a conversation."""
     title = StringField(required=True)
     content = StringField(required=True)
     date = DateTimeField(default=datetime.now(timezone.utc))
     author = StringField(required=True, default="system")
 
     def to_dict(self):
+        """Note as a JSON-safe dict."""
         return {"title": self.title, "content": self.content, "date": self.date.isoformat(), "author": self.author}
 
 
 class Conversation(Document):
+    """The thread of one customer on one platform: status (online / ended), read flag, assignment, resolution, note
+    and meta_data (thread id, call stats, call record).
+    """
     tenant_name = StringField(required=True)
     platform = StringField(required=True, default="waha")
-    summaries = ListField(DictField(), default=[])
     date = DateTimeField(default=datetime.now(timezone.utc))
     phone_number = StringField(required=True)
     messages = ListField(ReferenceField("MessageDocument", reverse_delete_rule=DO_NOTHING))
     conversation_status = StringField(default="online")
     read_by_manager = BooleanField(default=False)
     last_message_date = DateTimeField()
-    tags = ListField(EmbeddedDocumentField(Tag), default=[])
     # New field to track resolution status
     resolution_status = StringField(choices=["unresolved", "in_progress", "resolved"], default="unresolved")
     assigned_to = StringField(required=False, default=None, description="User assigned to the conversation")
     agent_required = BooleanField(default=False, description="Indicates if an agent is required for this conversation")
-    is_group = BooleanField(default=False)
     note = EmbeddedDocumentField(Note, required=False, default=None)
     profile_name = StringField(required=False, default=None)
     meta_data = DictField(required=False, default=dict)
@@ -80,15 +77,9 @@ class Conversation(Document):
     }
 
     def save(self, *args, **kwargs):
-
-        seen = set()
-        unique_tags = []
-        for tag in self.tags:
-            if tag.name not in seen:
-                unique_tags.append(tag)
-                seen.add(tag.name)
-        self.tags = unique_tags
-
+        """Save, arming the human-requested tag for a minute when agent_required flips on, then broadcast the
+        conversation over Redis Pub/Sub for the SSE clients.
+        """
         is_new = self._created
         changed_fields = list(self._get_changed_fields())
 
@@ -162,6 +153,9 @@ class Conversation(Document):
         prefetched_messages=None,
         prefetched_customer=None,
     ):
+        """Conversation as a dict for the API: messages (prefetched, or the newest 500; tool calls optional),
+        serialized meta_data and a profile name resolved from the customer or the last user message.
+        """
         from maia.models.messages import MessageDocument
         from bson import ObjectId
 
@@ -229,13 +223,11 @@ class Conversation(Document):
             "obj_id": str(self.id),
             "tenant_name": self.tenant_name,
             "platform": self.platform,
-            "summaries": self.summaries,
             "date": self.date,
             "phone_number": self.phone_number,
             "conversation_status": self.conversation_status,
             "read_by_manager": self.read_by_manager,
             "last_message_date": self.last_message_date,
-            "tags": [{"name": tag.name, "color": tag.color} for tag in self.tags],
             "messages": messages,
             "resolution_status": self.resolution_status,
             "assigned_to": self.assigned_to,
@@ -327,6 +319,9 @@ class Conversation(Document):
         return conv_dict
 
     def finish_conversation(self):
+        """Mark the conversation ended and attach its messages (including legacy ones with conversation_id=online) to
+        its id.
+        """
         from maia.models.messages import MessageDocument
         self.conversation_status = "ended"
         for message in self.messages:

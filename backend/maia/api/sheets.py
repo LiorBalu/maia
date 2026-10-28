@@ -26,10 +26,12 @@ PREVIEW_ROWS = 5
 
 
 class SheetConnectRequest(BaseModel):
+    """Body of PUT /sheets: a Google Sheets link or a spreadsheet id."""
     url: str
 
 
 def _tenant_or_404(tenant_name: str) -> TenantDocument:
+    """Load the tenant or raise 404."""
     tenant = TenantDocument.objects(name=tenant_name).first()
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
@@ -37,6 +39,9 @@ def _tenant_or_404(tenant_name: str) -> TenantDocument:
 
 
 def _payload(tenant: TenantDocument, use_cache: bool = True) -> dict[str, Any]:
+    """Response of every sheets endpoint: sheet id and url, the service-account address to share with, a preview of
+    the first rows or an error text.
+    """
     sheet_id = tenant.google_sheet_id or ""
     payload: dict[str, Any] = {
         "sheet_id": sheet_id or None,
@@ -64,11 +69,13 @@ def _payload(tenant: TenantDocument, use_cache: bool = True) -> dict[str, Any]:
 
 @sheets_router.get("/{tenant_name}", summary="Connected sheet + preview")
 async def get_sheet(tenant_name: str, user: User = Depends(authenticate_user_token)):
+    """The connected sheet of the tenant, with a preview."""
     return _payload(_tenant_or_404(tenant_name))
 
 
 @sheets_router.put("/{tenant_name}", summary="Connect a sheet (link or id); verified by reading it")
 async def connect_sheet(tenant_name: str, body: SheetConnectRequest, user: User = Depends(authenticate_user_token)):
+    """Connect a sheet: extract its id, read it once to verify access, store the id on the tenant."""
     tenant = _tenant_or_404(tenant_name)
     sheet_id = extract_sheet_id(body.url)
     if not sheet_id:
@@ -84,6 +91,7 @@ async def connect_sheet(tenant_name: str, body: SheetConnectRequest, user: User 
 
 @sheets_router.delete("/{tenant_name}", summary="Disconnect the sheet")
 async def disconnect_sheet(tenant_name: str, user: User = Depends(authenticate_user_token)):
+    """Clear the tenant's sheet id."""
     tenant = _tenant_or_404(tenant_name)
     tenant.update(google_sheet_id="")
     tenant.reload()

@@ -8,55 +8,24 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials, OAuth2PasswordBear
 from jose import JWTError, jwt
 from werkzeug.security import check_password_hash
 
-from maia.models.users import ROLE_PARTNER, ROLE_USER, User, UserDocument
-from maia.models.tenants import TenantDocument
+from maia.models.users import ROLE_USER, User, UserDocument
 from maia.config import ALGORITHM, JWT_SECRET
 
 TENANT_NAME_REQUIRED_DETAIL = "You need to specify a tenant name"
-
-
-def user_manages_tenant(user, tenant_name: Optional[str]) -> bool:
-    """Return True if the user administers `tenant_name` without being a member of it.
-
-    Staff always manage every tenant. A partner manages only the tenants he created
-    (``creator_email``) or that were assigned to him (``managed_by``) — he is
-    deliberately absent from the tenant's ``access_users`` / his own ``permissions``.
-    """
-    if getattr(user, "is_staff", False):
-        return True
-    if not tenant_name or getattr(user, "role", None) != ROLE_PARTNER:
-        return False
-    tenant = TenantDocument.objects(name=tenant_name).only("creator_email", "managed_by").first()
-    if not tenant:
-        return False
-    return tenant.creator_email == user.email or user.email in (tenant.managed_by or [])
-
-
-def user_managed_tenant_names(user) -> list:
-    """Tenant names a partner administers. Empty for non-partners (staff use a full query)."""
-    if getattr(user, "role", None) != ROLE_PARTNER:
-        return []
-    from mongoengine.queryset.visitor import Q
-
-    tenants = TenantDocument.objects(Q(creator_email=user.email) | Q(managed_by=user.email)).only("name")
-    return [tenant.name for tenant in tenants]
 
 
 def administrable_tenant_names(user) -> Optional[set]:
     """Tenants whose users the actor may administer. ``None`` means unrestricted (staff)."""
     if getattr(user, "is_staff", False):
         return None
-    if getattr(user, "role", None) == ROLE_PARTNER:
-        return set(user_managed_tenant_names(user))
     return set((user.permissions or {}).keys())
 
 
 def assert_can_administer_user(actor, tenants: Optional[list] = None, requested_role: Optional[str] = None) -> None:
     """Guard against privilege escalation when a non-staff actor manages users.
 
-    A partner (or a member holding ``grant_access``) may only create/update users that are
-    plain tenant members, and only inside the tenants he administers. Only staff can mint
-    staff or partner accounts.
+    A member holding ``grant_access`` may only create/update users that are plain tenant
+    members, and only inside the tenants they administer. Only staff can mint staff accounts.
     """
     if getattr(actor, "is_staff", False):
         return
@@ -80,7 +49,10 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
 
 async def authenticate_user_token(
     token: str = Depends(oauth2_scheme), tenant_name: Optional[str] = None
-) -> UserDocument:  # TODO add here if user is not own of the tenant name
+) -> UserDocument:
+    """FastAPI dependency: decode the Bearer JWT and load the user; with a tenant_name, a non-staff user must have
+    access to that tenant (permissions).
+    """
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
         email: str = payload.get("sub")
@@ -94,7 +66,7 @@ async def authenticate_user_token(
             )
         if tenant_name:
             if not user.is_staff:
-                if tenant_name not in list(user.permissions.keys()) and not user_manages_tenant(user, tenant_name):
+                if tenant_name not in list(user.permissions.keys()):
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this tenant"
                     )
@@ -110,7 +82,8 @@ async def authenticate_user_token(
 
 def verify_token(
     token: str = Depends(oauth2_scheme), tenant_name: Optional[str] = None
-) -> UserDocument:  # TODO add here if user is not own of the tenant name
+) -> UserDocument:
+    """Same check as authenticate_user_token, as a sync function (used by verify_token_extended)."""
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
         email: str = payload.get("sub")
@@ -125,7 +98,7 @@ def verify_token(
 
         if tenant_name:
             if not user.is_staff:
-                if tenant_name not in list(user.permissions.keys()) and not user_manages_tenant(user, tenant_name):
+                if tenant_name not in list(user.permissions.keys()):
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this tenant"
                     )
@@ -139,15 +112,9 @@ def verify_token(
         )
 
 
-def _passes_without_tenant_scope(user: UserDocument, security_scopes: SecurityScopes, tenant_name: Optional[str]) -> bool:
-    """Return True when the actor is granted access before any tenant-level check."""
-    if user.is_staff and "staff" in security_scopes.scopes:
-        return True
-    # A partner has full authority over the tenants he administers, and passes any endpoint
-    # explicitly opened to partners (tenant creation, listing his own portfolio).
-    if user.is_partner and tenant_name and user_manages_tenant(user, tenant_name):
-        return True
-    return user.is_partner and "partner" in security_scopes.scopes
+def _passes_without_tenant_scope(user: UserDocument, security_scopes: SecurityScopes) -> bool:
+    """Return True when the actor is granted access before any tenant-level check (staff on a staff endpoint)."""
+    return user.is_staff and "staff" in security_scopes.scopes
 
 
 def _resolve_tenant_name(
@@ -181,9 +148,12 @@ def _assert_scopes_granted(user: UserDocument, security_scopes: SecurityScopes, 
 def verify_token_extended(
     security_scopes: SecurityScopes, token: str = Depends(oauth2_scheme), tenant_name: Optional[str] = None
 ) -> UserDocument:
+    """FastAPI dependency with scopes: staff pass everywhere, a member needs the required permissions on the tenant
+    (implicit tenant for single-tenant members).
+    """
     user = verify_token(token, tenant_name)
 
-    if _passes_without_tenant_scope(user, security_scopes, tenant_name):
+    if _passes_without_tenant_scope(user, security_scopes):
         return user
 
     tenant_name = _resolve_tenant_name(user, security_scopes, tenant_name)
@@ -197,6 +167,9 @@ def verify_token_extended(
 
 
 async def verify_basic_auth(credentials: HTTPBasicCredentials = Depends(security)):
+    """Basic Auth of the API docs: a dashboard user, or the MAIA_DOCS_USER / MAIA_DOCS_PASSWORD pair from the
+    environment.
+    """
     from maia.services.mongo import manager_engine
 
     user = await manager_engine.find_one(User, User.email == credentials.username)

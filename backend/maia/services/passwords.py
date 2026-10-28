@@ -9,6 +9,7 @@ from maia.models.users import PasswordHistoryEntry, UserDocument
 
 
 def _is_reused_password(new_password: str, user: UserDocument) -> bool:
+    """True when the new password equals the current one or one of the stored previous hashes."""
     if user.password and check_password_hash(user.password, new_password):
         return True
 
@@ -20,6 +21,8 @@ def _is_reused_password(new_password: str, user: UserDocument) -> bool:
 
 
 def update_user_password(user: UserDocument, new_password: str) -> None:
+    """Set a new password: refuse empty or reused ones, keep the last 3 hashes in the history, stamp the change date.
+    """
     if not new_password or not new_password.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password cannot be empty")
 

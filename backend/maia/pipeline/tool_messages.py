@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def generate_tool_response(request, tool_call):
+    """OpenAI-style tool message ({role: tool, content, tool_call_id}) from the stored result of the call."""
     return {
         "role": "tool",
         "content": [{"type": "text", "text": request["tool_results"][tool_call.id]}],
@@ -27,6 +28,7 @@ def generate_tool_response(request, tool_call):
 
 
 def save_tool_response(request, tool_chat_response):
+    """Save the tool's response as a role=tool message of the conversation."""
     MessageDocument(
         phone_number=request["sender_id"],
         tenant_name=request["tenant_name"],
@@ -45,6 +47,7 @@ def save_tool_response(request, tool_chat_response):
 
 
 def save_tool_call_payload(request, tool_call_payload):
+    """Save the assistant's tool request as a role=tool_calls message of the conversation."""
     MessageDocument(
         phone_number=request["sender_id"],
         tenant_name=request["tenant_name"],
@@ -57,6 +60,7 @@ def save_tool_call_payload(request, tool_call_payload):
 
 
 def generate_tool_call_payload(tool_call):
+    """OpenAI-style assistant message carrying one tool call (id, name, arguments)."""
     return {
         "role": "assistant",
         "tool_calls": [

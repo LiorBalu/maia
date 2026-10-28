@@ -3,7 +3,7 @@ Centralized contextual logging system that automatically adds tenant_name and us
 
 Context values are injected as proper LogRecord attributes (not into the message string), so:
     - Console (dev): formatter displays [tenant_name:xxx] [user_id:yyy] — same field names as JSON
-    - Loki/Grafana (prod): JSON formatter exposes them as real fields → filterable labels, no regex needed
+    - JSON formatter (prod): exposes them as real fields → filterable labels, no regex needed
 
 phone_number is a separate ContextVar (the middleware sets it) and is merged into user_id:
 user_id = explicit_user_id or phone_number.
@@ -23,14 +23,17 @@ context_user_id: ContextVar[Optional[str]] = ContextVar("user_id", default=None)
 
 
 def set_context_tenant_name(tenant_name: str):
+    """Set the tenant of the current task / request for the log context."""
     context_tenant_name.set(tenant_name)
 
 
 def set_context_phone_number(phone_number: str):
+    """Set the customer's phone number for the log context (shown as user_id)."""
     context_phone_number.set(phone_number)
 
 
 def set_context_user_id(user_id: str):
+    """Set the user id for the log context."""
     context_user_id.set(user_id)
 
 
@@ -57,16 +60,17 @@ class ContextualFilter(logging.Filter):
                            The app always uses user_id as the primary user identifier.
       - record.phone_number: raw phone_number value, also exposed as its own field.
 
-    JSON formatter (Loki) exposes them as real label fields:
+    A JSON formatter exposes them as real fields:
         {"tenant_name": "my-business", "user_id": "972...", "message": "..."}
-      → Loki query: {tenant_name="my-business"} — no regex needed
+      → filter the logs by tenant_name="my-business", no regex needed
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
+        """Attach tenant_name, user_id and phone_number to the record; never drops it."""
         record.tenant_name = context_tenant_name.get() or ""
         # user_id = explicit user_id OR fallback to phone_number
         record.user_id = context_user_id.get() or context_phone_number.get() or ""
-        # phone_number kept as a separate attribute for Loki queries that reference it directly
+        # phone_number kept as a separate attribute so log filters can reference it directly
         record.phone_number = context_phone_number.get() or ""
         return True
 
@@ -82,6 +86,7 @@ class ContextualConsoleFormatter(logging.Formatter):
     """
 
     def format(self, record: logging.LogRecord) -> str:
+        """Prefix the message with [file] [func] [tenant_name] [user_id] before the standard formatting."""
         parts = []
         if record.filename:
             parts.append(f"[file:{record.filename}]")
@@ -124,7 +129,7 @@ def setup_contextual_logging(level=logging.INFO):
     - Attaches ContextualFilter to the root logger so every LogRecord gets
       tenant_name / phone_number / user_id as proper attributes.
     - Uses ContextualConsoleFormatter for human-readable dev output.
-    - In production with Loki, swap the handler's formatter for a JSON formatter
+    - In production, swap the handler's formatter for a JSON formatter
       (e.g. python-json-logger) — the attributes will appear as proper JSON fields.
     - Replaces built-in print() with contextual_print().
     """

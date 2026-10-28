@@ -1,0 +1,25 @@
+# WAHA (WhatsApp HTTP API): the self-hosted WhatsApp Web client behind the WhatsApp channel.
+# Usage: docker compose -f docker-compose.local.yml -f docker-compose.local.override.yml -f docker-compose.waha.yml up -d waha
+# The backend reaches it inside the compose network as http://waha:3000 (WAHA_BASE_URL);
+# the WAHA dashboard for scanning QR codes is on the host at http://localhost:3030/dashboard.
+# WAHA sends webhooks to WAHA_WEBHOOK_BASE_URL/api/async/waha/<tenant> (http://fastapi:8000 here,
+# same compose network); when that variable is empty the public BACKEND_URL (ngrok) is used instead
+# and must be up whenever a session is created.
+services:
+  waha:
+    image: devlikeapro/waha:noweb
+    container_name: maia-waha
+    restart: unless-stopped
+    ports:
+      - "3030:3000"
+    environment:
+      - WHATSAPP_DEFAULT_ENGINE=NOWEB
+      - WAHA_API_KEY=${WAHA_API_KEY}
+      - WAHA_DASHBOARD_USERNAME=${WAHA_DASHBOARD_USERNAME:-admin}
+      - WAHA_DASHBOARD_PASSWORD=${WAHA_DASHBOARD_PASSWORD:-admin}
+      - WAHA_PRINT_QR=false
+      - WHATSAPP_RESTART_ALL_SESSIONS=true
+    volumes:
+      - ./waha_sessions:/app/.sessions
+    networks:
+      - backend_network

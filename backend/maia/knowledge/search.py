@@ -17,14 +17,6 @@ from maia.knowledge.qdrant import (
 )
 
 logger = logging.getLogger(__name__)
-# Redis client for session management (chat history).
-try:
-    from maia.services.redis_clients import get_sync_redis
-
-    redis_client = get_sync_redis(decode_responses=False)
-except Exception:
-    # Will be handled when actually needed
-    redis_client = None
 
 
 def search_in_documents(
@@ -188,6 +180,7 @@ class MultiDocumentRetriever(BaseRetriever):
         categories: Optional[List[str]] = None,
         top_k: int = 5,
     ):
+        """Pydantic init with the tenant, optional document ids / categories and top_k."""
         super().__init__(tenant_name=tenant_name, document_ids=document_ids, categories=categories, top_k=top_k)
 
     def _get_relevant_documents(
@@ -229,6 +222,7 @@ class QARetriever(BaseRetriever):
     current_image: Optional[str] = None  # Base64 data URI for image search
 
     class Config:
+        """Pydantic configuration."""
         arbitrary_types_allowed = True
 
     def __init__(
@@ -238,6 +232,7 @@ class QARetriever(BaseRetriever):
         categories: Optional[List[str]] = None,
         metadata_filter: Optional[Dict[str, Any]] = None,
     ):
+        """Pydantic init with the tenant, top_k, categories and the metadata filter."""
         super().__init__(tenant_name=tenant_name, top_k=top_k, categories=categories, metadata_filter=metadata_filter)
 
     def _get_relevant_documents(
@@ -298,6 +293,7 @@ class CombinedRetriever(BaseRetriever):
     current_image: Optional[str] = None  # Base64 data URI for image search
 
     class Config:
+        """Pydantic configuration."""
         arbitrary_types_allowed = True
 
     def __init__(
@@ -308,6 +304,9 @@ class CombinedRetriever(BaseRetriever):
         qa_top_k: Optional[int] = None,
         score_threshold: float = 0.0,
     ):
+        """Pydantic init with the retrievers and the per-source caps (qa_top_k defaults to 0, documents_top_k to
+        top_k).
+        """
         super().__init__(
             retrievers=retrievers,
             top_k=top_k,

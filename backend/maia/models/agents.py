@@ -7,6 +7,9 @@ from pydantic import BaseModel
 
 
 class AgentDocument(Document):
+    """LLM configuration of a tenant: provider, model, temperature, retrieval top-k and thresholds. Only one agent is
+    active per tenant.
+    """
     name = StringField(required=True)
     tenant_name = StringField(required=True)
     description = StringField()
@@ -23,6 +26,7 @@ class AgentDocument(Document):
     meta = {"collection": "agents"}
 
     def save(self, *args, **kwargs):
+        """Stamp created_at / updated_at; an active agent deactivates the tenant's other agents."""
         if not self.created_at:
             self.created_at = datetime.utcnow()
         self.updated_at = datetime.utcnow()
@@ -35,6 +39,7 @@ class AgentDocument(Document):
 
     @property
     def agent_config(self):
+        """The dict the RAG chain reads (model, provider, temperature, thresholds, top-k)."""
         return {
             "model": self.model,
             "provider": self.provider,
@@ -47,6 +52,7 @@ class AgentDocument(Document):
 
 
 class AgentCreateRequest(BaseModel):
+    """Body of agent creation / update."""
     name: str
     description: str
     is_active: bool
@@ -60,6 +66,7 @@ class AgentCreateRequest(BaseModel):
 
 
 class AgentResponse(BaseModel):
+    """An agent as returned by the API."""
     id: str
     tenant_name: str
     name: str

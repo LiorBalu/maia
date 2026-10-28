@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 
 class OpeningHours(EmbeddedDocument):
+    """Opening hours of one weekday (start / end as HH:MM, or closed)."""
     day = StringField(required=True)
     start_time = StringField(required=False)
     end_time = StringField(required=False)
@@ -33,6 +34,9 @@ DAYS_OF_WEEK = [
 
 
 class GoogleShared(Document):
+    """A Google account connected to a tenant: OAuth tokens and scopes, default-calendar flag, opening hours,
+    ignore-long-events, Gmail watch flag.
+    """
     meta = {"collection": "google_accounts", "indexes": [{"fields": ["email"], "unique": True, "sparse": True}]}
 
     tenant_name = StringField(required=True)
@@ -52,6 +56,7 @@ class GoogleShared(Document):
 
 
 class DaysOfWeek(str, Enum):
+    """Weekday keys of the opening hours (sun .. sat)."""
     SUN = "sun"
     MON = "mon"
     TUE = "tue"
@@ -62,10 +67,12 @@ class DaysOfWeek(str, Enum):
 
 
 class OpeningHoursModel(BaseModel):
+    """Pydantic view of OpeningHours (API payloads)."""
     day: DaysOfWeek
     start_time: str
     end_time: str
     closed: bool
 
     class Config:
+        """Example payload shown in the API docs."""
         json_schema_extra = {"example": {"day": "mon", "start_time": "09:00", "end_time": "17:00", "closed": False}}

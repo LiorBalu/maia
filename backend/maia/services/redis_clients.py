@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 
 def _redis_url() -> str:
+    """REDIS_URL from the environment, with the local default."""
     return getenv("REDIS_URL", "redis://localhost:6379/0")
 
 

@@ -17,8 +17,6 @@ from maia.models.settings import CallSettingsDocument, ChatSettingsDocument
 from maia.models.tenant_features import FeatureTenant, FeatureTenantModel
 from maia.api.security import (
     authenticate_user_token,
-    user_managed_tenant_names,
-    user_manages_tenant,
     verify_token_extended,
 )
 from maia.utils.make_automation import make_automation
@@ -141,8 +139,9 @@ tenant_router = APIRouter(prefix="/tenants", tags=["Tenants"])
 
 
 class TenantRequest(BaseModel):
+    """Body of tenant creation / update: status, LLM providers, channels, bot settings per platform, features."""
     name: Optional[str] = None
-    status: Literal["active", "inactive", "developer", "development", "pending"] = "active"
+    status: Literal["active", "inactive", "pending"] = "active"
     description: Optional[str] = None
     openai_api_key: Optional[str] = None
     gpt_model: Optional[str] = None
@@ -154,12 +153,12 @@ class TenantRequest(BaseModel):
     google_llm_settings: Optional[GoogleLLMSettingsModel] = None
     platform_bot_settings: Optional[List[PlatformBotSettingsModel]] = []
     features: List[FeatureTenantModel] = []
-    dev_url: Optional[str] = None
     default_language: Optional[str] = "he"
     default_timezone: Optional[str] = DEFAULT_TIMEZONE
     owner_phone_number: Optional[str] = None
 
     class Config:
+        """Example payload shown in the API docs."""
         json_schema_extra = {
             "example": {
                 "name": "tenant_name",
@@ -180,12 +179,12 @@ class TenantRequest(BaseModel):
 
 
 @tenant_router.get("", response_model=List[TenantRequest])
-async def get_tenants(user: UserDocument = Security(verify_token_extended, scopes=["staff", "partner"])):
+async def get_tenants(user: UserDocument = Security(verify_token_extended, scopes=["staff"])):
     """
     Retrieve a list of tenants accessible to the user.
 
-    If the user is a staff member, all tenants are retrieved. A partner gets the tenants he
-    administers (created or assigned). Otherwise, only tenants that the user has access to.
+    If the user is a staff member, all tenants are retrieved. Otherwise, only tenants that the
+    user has access to.
 
     Args:
         user (User): The user object, obtained through dependency injection
@@ -197,8 +196,6 @@ async def get_tenants(user: UserDocument = Security(verify_token_extended, scope
     """
     if user.is_staff:
         tenants = TenantDocument.objects().only("name", "description", "status")
-    elif user.is_partner:
-        tenants = TenantDocument.objects(name__in=user_managed_tenant_names(user)).only("name", "description", "status")
     else:
         tenant_names = list(user.permissions.keys())
         tenants = TenantDocument.objects(name__in=tenant_names).only("name", "description", "status")
@@ -213,7 +210,7 @@ def _validate_create_tenant_request(request: Request, tenant_request: TenantRequ
     """Guard the POST (creation) flow: authorisation and tenant-name format."""
     if request.method != "POST":
         return
-    if not (user.is_staff or user.is_partner):
+    if not user.is_staff:
         raise HTTPException(status_code=403, detail="You are not authorized to create a tenant")
     if not tenant_request.name:
         raise HTTPException(status_code=400, detail="Tenant name is required")
@@ -300,13 +297,9 @@ def _build_new_tenant_document(tenant_request: TenantRequest) -> TenantDocument:
 
 
 def _assign_tenant_ownership(tenant_doc: TenantDocument, user: User) -> None:
-    """A partner administers the tenant from the outside — he is never a member of it."""
+    """The creator becomes the first member of the tenant."""
     tenant_doc.creator_email = tenant_doc.creator_email or user.email
-    if user.is_partner:
-        if user.email not in (tenant_doc.managed_by or []):
-            tenant_doc.managed_by = list(tenant_doc.managed_by or []) + [user.email]
-    else:
-        tenant_doc.access_users = tenant_doc.access_users or [user.email]
+    tenant_doc.access_users = tenant_doc.access_users or [user.email]
 
 
 @tenant_router.post("", response_model=TenantRequest)
@@ -314,11 +307,11 @@ def _assign_tenant_ownership(tenant_doc: TenantDocument, user: User) -> None:
 async def create_tenant(
     tenant_request: TenantRequest,
     request: Request,
-    user: User = Security(verify_token_extended, scopes=["staff", "partner", "grant_access"]),
+    user: User = Security(verify_token_extended, scopes=["staff", "grant_access"]),
     tenant_name: Optional[str] = None,
 ):
     """
-    This endpoint allows a staff user or a partner to create a new tenant. The tenant name is
+    This endpoint allows a staff user to create a new tenant. The tenant name is
     converted to lowercase and spaces are replaced with underscores. The name
     must be alphanumeric and may contain digits, underscores, or hyphens. If a
     tenant with the same name already exists, an error is raised.
@@ -367,11 +360,11 @@ async def create_tenant(
 
 
 class TenantDetail(BaseModel):
+    """Full tenant detail returned to staff (includes the tokens and every account)."""
     name: str
     status: str
     description: str
     creator_email: Optional[str] = None
-    managed_by: List[str] = []
     gpt_model: Optional[str]
     openai_api_key: Optional[str]
     access_users: List[str]
@@ -384,19 +377,22 @@ class TenantDetail(BaseModel):
     openai_settings: Optional[OpenAISettingsModel] = None
     platform_bot_settings: List[PlatformBotSettingsModel] = []
     features: List[FeatureTenantModel] = []
-    dev_url: Optional[str] = None
     default_language: Optional[str] = "he"
     default_timezone: Optional[str] = DEFAULT_TIMEZONE
     owner_phone_number: Optional[str] = None
 
 
 def _collect_tenant_phone_numbers(tenant: TenantDocument) -> List[str]:
+    """Distinct phone numbers of the tenant's Twilio and WAHA accounts."""
     twilio_numbers = {account.phone_number for account in tenant.twilio_accounts or [] if account.phone_number}
     waha_numbers = {account.phone_number for account in tenant.waha_accounts or [] if account.phone_number}
     return list(twilio_numbers | waha_numbers)
 
 
 def _build_tenant_response_context(tenant: TenantDocument) -> dict:
+    """Convert the tenant's embedded documents into the Pydantic models of the response; the shared OpenAI key is
+    masked.
+    """
     openai_settings = (
         OpenAISettingsModel(**tenant.openai_settings.to_mongo().to_dict()) if tenant.openai_settings else None
     )
@@ -431,12 +427,12 @@ def _build_tenant_response_context(tenant: TenantDocument) -> dict:
 
 
 def _build_staff_tenant_detail(tenant: TenantDocument, context: dict) -> TenantDetail:
+    """TenantDetail (full) for staff."""
     return TenantDetail(
         name=tenant.name,
         status=tenant.status,
         description=tenant.description,
         creator_email=tenant.creator_email,
-        managed_by=list(tenant.managed_by or []),
         openai_api_key=tenant.openai_api_key,
         gpt_model=tenant.gpt_model,
         access_users=tenant.access_users,
@@ -449,7 +445,6 @@ def _build_staff_tenant_detail(tenant: TenantDocument, context: dict) -> TenantD
         platform_bot_settings=context["platform_bot_settings"],
         google_llm_settings=context["google_llm_settings"],
         anthropic_settings=context["anthropic_settings"],
-        dev_url=tenant.dev_url or None,
         default_language=tenant.default_language or "he",
         default_timezone=tenant.default_timezone or DEFAULT_TIMEZONE,
         owner_phone_number=tenant.owner_phone_number or None,
@@ -457,6 +452,7 @@ def _build_staff_tenant_detail(tenant: TenantDocument, context: dict) -> TenantD
 
 
 def _build_customer_tenant_detail(tenant: TenantDocument, context: dict) -> TenantCustomer:
+    """TenantCustomer (reduced detail) for tenant members."""
     return TenantCustomer(
         name=tenant.name,
         status=tenant.status,
@@ -473,7 +469,6 @@ def _build_customer_tenant_detail(tenant: TenantDocument, context: dict) -> Tena
         platform_bot_settings=context["platform_bot_settings"],
         google_llm_settings=context["google_llm_settings"],
         anthropic_settings=context["anthropic_settings"],
-        dev_url=tenant.dev_url or None,
         default_language=tenant.default_language or "he",
         default_timezone=tenant.default_timezone or DEFAULT_TIMEZONE,
         owner_phone_number=tenant.owner_phone_number or None,
@@ -501,8 +496,7 @@ async def get_tenant(tenant_name: str, user: UserDocument = Security(verify_toke
         raise HTTPException(status_code=404, detail=TENANT_NOT_FOUND)
     tenant.update_all_features()
     context = _build_tenant_response_context(tenant)
-    # A partner configures numbers, tokens and settings of his tenants: he needs the full detail.
-    if user.is_staff or user_manages_tenant(user, tenant_name):
+    if user.is_staff:
         return _build_staff_tenant_detail(tenant, context)
     if tenant_name in list(user.permissions.keys()):
         return _build_customer_tenant_detail(tenant, context)
@@ -517,7 +511,7 @@ async def delete_tenant(tenant_name: str, user: User = Depends(authenticate_user
     tenant = TenantDocument.objects(name=tenant_name).first()
     if not tenant:
         raise HTTPException(status_code=404, detail=TENANT_NOT_FOUND)
-    if user.is_staff or user.email == tenant.creator_email or user.email in (tenant.managed_by or []):
+    if user.is_staff or user.email == tenant.creator_email:
         tenant.delete()
         return JSONResponse(content={"message": "Tenant deleted successfully"})
     else:

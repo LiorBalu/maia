@@ -6,6 +6,7 @@ import csv
 
 
 def read_csv(filename: str) -> str:
+    """A CSV file (URL or path) as tab-separated lines of text."""
     file_text = ""
     if filename.startswith("http://") or filename.startswith("https://"):
         # Download the remote CSV file

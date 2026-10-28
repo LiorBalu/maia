@@ -6,6 +6,7 @@ import json
 
 def decode_pubsub_message(pubsub_message):
     # Decode the Base64 payload
+    """The JSON payload (emailAddress, historyId) of a Pub/Sub push envelope."""
     decoded_data = base64.b64decode(pubsub_message["message"]["data"]).decode("utf-8")
     # Convert to JSON if that is the expected format
     if isinstance(decoded_data, bytes):

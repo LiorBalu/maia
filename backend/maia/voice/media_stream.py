@@ -342,6 +342,7 @@ async def handle_media_stream(websocket: WebSocket, tenant_name: str, from_numbe
                             logger.log_event("error", f"❌ Error closing OpenAI WebSocket: {str(e)}", True)
 
             def record_user_message(text: str, role="user"):
+                """Save a transcript line (user or assistant) as a telephone message of the conversation."""
                 msg = MessageDocument(
                     tenant_name=tenant_name,
                     message=text,

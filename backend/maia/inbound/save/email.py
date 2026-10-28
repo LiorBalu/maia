@@ -9,8 +9,6 @@ from typing import Optional
 from maia.inbound.html_text import html_to_text
 from maia.inbound.save.common import (
     SaveResponse,
-    ensure_thread_id_in_conversation,
-    get_or_create_conversation_for_thread_id,
     update_conversation_profile_name,
 )
 from maia.models.customers import CustomerDocument
@@ -28,7 +26,6 @@ def clean_email_reply(text):
     Removes quoted reply text from email body.
     Handles patterns like:
     - On [date], [name] wrote:
-    - Le [date], [name] a écrit :  (French-locale mail clients)
     - From: ...
     """
     if not text:
@@ -37,7 +34,6 @@ def clean_email_reply(text):
     # Patterns that indicate start of a reply
     patterns = [
         r"On\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec).+?wrote:",
-        r"Le\s+(?:lun\.|mar\.|mer\.|jeu\.|ven\.|sam\.|dim\.).+?a écrit\s?:",
         r"From:\s.+?To:\s.+?Subject:",
         r"Sent from my iPhone",
         r"Sent from my Android",
@@ -162,14 +158,6 @@ async def save_email_message(data: dict, tenant_name: Optional[str] = None) -> S
                     if message_details["attachments"] and len(message_details["attachments"]) > 0:
                         media_url = message_details["attachments"][0]["data"]
 
-                    # Resolve conversation_id by thread_id if the customer has follow_thread_conversation enabled
-                    thread_id = message_details.get("thread_id")
-                    resolved_conversation_id = None
-                    if thread_id and customer.get_meta_data_field("follow_thread_conversation", False):
-                        resolved_conversation_id = get_or_create_conversation_for_thread_id(
-                            tenant_name, email, "email", thread_id
-                        )
-
                     # Extract reply info
                     in_reply_to = message_details.get("in_reply_to")
                     message_id_header = message_details.get("message_id")
@@ -204,7 +192,6 @@ async def save_email_message(data: dict, tenant_name: Optional[str] = None) -> S
                         media_url=media_url,
                         sid=msg_id,
                         message_sids=[],
-                        **(({"conversation_id": resolved_conversation_id}) if resolved_conversation_id else {}),
                         meta_data={
                             "subject": message_details["subject"],
                             "thread_id": message_details.get("thread_id"),
@@ -218,8 +205,6 @@ async def save_email_message(data: dict, tenant_name: Optional[str] = None) -> S
                     msg.save()
                     msg.reload()
                     update_conversation_profile_name(tenant_name, email, profile_name, msg.conversation_id)
-                    if thread_id and customer.meta_data.get("follow_thread_conversation"):
-                        ensure_thread_id_in_conversation(msg.conversation_id, thread_id)
 
                     logger.info(f"From: {message_details['from']}")
                     logger.info(f"To: {message_details['to']}")

@@ -23,6 +23,7 @@ DB_NAME = getenv("MAIA_DB_NAME", "maia")
 
 
 def get_tenant_name(tenant_name: str):
+    """FastAPI dependency: the tenant name when the tenant exists (cached), 404 otherwise."""
     if tenant_name in tenants_name_list:
         return tenant_name
     tenants = TenantDocument.objects(name=tenant_name)
@@ -33,10 +34,12 @@ def get_tenant_name(tenant_name: str):
 
 
 def create_mongo_service(tenant_name) -> MongoService:
+    """MongoService on the platform database."""
     return MongoService(db_name=DB_NAME)
 
 
 def create_tenant_document(tenant_name) -> TenantDocument:
+    """The tenant document, created when missing."""
     tenant = TenantDocument.objects(name=tenant_name).first()
     if not tenant:
         tenant = TenantDocument(name=tenant_name)
@@ -46,6 +49,7 @@ def create_tenant_document(tenant_name) -> TenantDocument:
 
 
 def update_tenant_document(tenant_name):
+    """Reload the tenant document into the registry cache."""
     if tenant_name not in services:
         services[tenant_name] = {}
     services[tenant_name]["tenant_document"] = TenantDocument.objects(name=tenant_name).first()
@@ -53,6 +57,7 @@ def update_tenant_document(tenant_name):
 
 
 def create_chatbot_service(tenant_name) -> ChatbotService:
+    """ChatbotService for the tenant, from its OpenAI settings (or the shared key)."""
     tenant_document = get_services(tenant_name, "tenant_document")
     openai_settings = tenant_document.openai_settings
     gpt_model = tenant_document.openai_settings.gpt_model or tenant_document.gpt_model
@@ -71,6 +76,9 @@ SERVICE_FACTORIES = {
 
 
 def get_services(tenant_name: str, service_name: str, **kwargs):
+    """Per-tenant service cache: tenant_document is reloaded on every call, chatbot_service is always fresh, the
+    others are created once.
+    """
     if tenant_name not in services:
         services[tenant_name] = {}
     tenant_services = services[tenant_name]
@@ -86,6 +94,9 @@ def get_services(tenant_name: str, service_name: str, **kwargs):
 
 
 def get_sender_service(tenant_name: str, service_name: Optional[str] = None, platform: str = "waha", **kwargs):
+    """The outbound service of a platform: EmailPlatformService for email, WahaService (keyed by the business number
+    in ``to``) for WhatsApp.
+    """
     if platform == "email":
         return EmailPlatformService(tenant_name, **kwargs)
     elif platform == "waha":

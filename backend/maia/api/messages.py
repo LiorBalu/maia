@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class InfiniteScrollResponse(BaseModel):
+    """One page of the inbox list: conversations, the cursor of the next page and counts."""
     conversations: List[Dict[str, Any]]
     next_cursor: Optional[str] = None
     has_more: bool = False
@@ -40,6 +41,7 @@ conversations_router = APIRouter(prefix="/conversations", tags=["Conversations"]
 async def read_conversation(
     tenant_name: str, conversation_id: str, phone_number: str, user: User = Depends(authenticate_user_token)
 ):
+    """Mark a conversation as read by the manager and broadcast the change over SSE."""
     conversation_doc = Conversation.objects(tenant_name=tenant_name, id=conversation_id).first()
     if not conversation_doc:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -58,6 +60,8 @@ async def read_conversation(
 
 
 def normalize_phone_number(phone_number: str) -> Optional[str]:
+    """Strip the whatsapp: prefix, '+', spaces and dashes; an Israeli local number (leading 0) becomes its 972 form.
+    """
     if not phone_number:
         return None
     if phone_number.startswith("whatsapp:+"):
@@ -110,6 +114,9 @@ async def send_message_api(
     platform: str = Query("waha"),
     role: str = Query("manager"),
 ):
+    """Send a message from the dashboard to a customer (JSON, or multipart with a file). Optionally appends text to
+    the customer's additional_context, then send_platform_message sends and saves it.
+    """
     content_type = (request.headers.get("content-type") or "").lower()
     message: Optional[str] = None
     reply_to_message_id: Optional[str] = None
@@ -193,6 +200,7 @@ async def send_message_api(
 
 
 def format_message_for_whatsapp(message: str) -> str:
+    """Turn markdown emphasis (**, __, double backticks) into WhatsApp formatting (*, _, backtick)."""
     return str(message).replace("**", "*").replace("__", "_").replace("``", "`") if message else ""
 
 
@@ -209,6 +217,10 @@ async def send_platform_message(
     customer: Optional[CustomerDocument] = None,
     conversation_id: Optional[str] = None,
 ):
+    """Send a manager message on WhatsApp (WAHA) or email and save it: resolve the thread (reply-to message or
+    conversation), send the text and the file, write the MessageDocument, add the text to the Redis history as a
+    manager turn and broadcast the conversation over SSE. 424 when no sender is connected.
+    """
     try:
         file_message = None
         # await asyncio.sleep(20)  # Simulate some processing delay
@@ -330,7 +342,7 @@ async def send_platform_message(
                 conversation_id=conversation_id,
             )
             message_doc.save()
-            # Tag conversation with thread_id for routing
+            # Store the thread_id on the conversation for routing
             if thread_id and message_doc.conversation_id:
                 from maia.inbound.save.common import ensure_thread_id_in_conversation
 
@@ -384,6 +396,7 @@ async def send_platform_message(
 
 @conversations_router.put("/{tenant_name}/{phone_number}/end-current-conversation")
 async def end_current_conversation(tenant_name: str, phone_number: str, user: str = Depends(authenticate_user_token)):
+    """Close the customer's online conversation (reset_conversation)."""
     conv = Conversation.objects(tenant_name=tenant_name, phone_number=phone_number, conversation_status="online").first()
     if not conv:
         raise HTTPException(status_code=404, detail="Online conversation not found")
@@ -428,7 +441,6 @@ async def get_conversations_infinite(
     cursor: Optional[str] = None,  # cursor for pagination
     include_media_url: bool = True,
     sort_by: Optional[str] = "last_message_date",
-    tags: Optional[str] = None,
     sort_order: Optional[str] = "desc",
     include_tool_calls: Optional[bool] = False,
     assigned_to: Optional[str] = None,
@@ -443,10 +455,6 @@ async def get_conversations_infinite(
     Uses cursor-based pagination for better performance with large datasets.
     If query is provided, searches in message text content.
     """
-    list_tags = []
-    if tags is not None:
-        list_tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
-
     # Get query filters (without the query parameter for message search)
     query_filters = filter_conversations(
         tenant_name,
@@ -457,7 +465,6 @@ async def get_conversations_infinite(
         conversation_status,
         read_by_manager,
         last_message_date,
-        tags=list_tags,
         assigned_to=assigned_to,
         resolution_status=resolution_status,
         agent_required=agent_required,

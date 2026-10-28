@@ -25,12 +25,14 @@ logger = logging.getLogger(__name__)
 
 
 class TwilioAccountModel(BaseModel):
+    """Twilio Voice credentials (API view)."""
     account_sid: str
     auth_token: str
     phone_number: str
 
 
 class WahaAccountModel(BaseModel):
+    """A WAHA (WhatsApp) account (API view): number, webhook, worker, connection status."""
     phone_number: str
     webhook_url: Optional[str] = None
     server_url: Optional[str] = None  # WAHA worker base URL; None = the default server
@@ -41,22 +43,26 @@ class WahaAccountModel(BaseModel):
 
 
 class OpenAISettingsModel(BaseModel):
+    """OpenAI key and model of the tenant (API view)."""
     openai_api_key: Optional[str] = None
     gpt_model: Optional[str] = None
     temperature: float = 0.5
 
 
 class AnthropicSettingsModel(BaseModel):
+    """Anthropic key and model of the tenant (API view)."""
     anthropic_api_key: Optional[str] = None
     model: Optional[str] = None
 
 
 class GoogleLLMSettingsModel(BaseModel):
+    """Google LLM key and model of the tenant (API view)."""
     google_api_key: Optional[str] = None
     model: Optional[str] = None
 
 
 class WorkingHoursModel(BaseModel):
+    """Bot hours of one weekday (API view)."""
     day: str
     start_time: str  # Format: "HH:MM" (24h format)
     end_time: str  # Format: "HH:MM" (24h format)
@@ -65,6 +71,7 @@ class WorkingHoursModel(BaseModel):
 
 
 class PlatformBotSettingsModel(BaseModel):
+    """Bot mode of one platform (API view): always_bot, always_manual, or scheduled with working hours."""
     platform: str  # "waha", "web", "email", "telephone"
     mode: str = "always_bot"  # "always_bot", "always_manual", "scheduled"
     working_hours: List[WorkingHoursModel] = []
@@ -80,6 +87,7 @@ class TwilioAccount(EmbeddedDocument):
 
 
 class WahaAccount(EmbeddedDocument):
+    """A WAHA (WhatsApp) account of the tenant: the connected number, its webhook, worker and session status."""
     phone_number = StringField(required=True)
     webhook_url = StringField(required=False)
     server_url = StringField(required=False)  # WAHA worker base URL; empty = the default server
@@ -90,22 +98,26 @@ class WahaAccount(EmbeddedDocument):
 
 
 class OpenAISettings(EmbeddedDocument):
+    """OpenAI key and model of the tenant (empty key = the platform's shared key)."""
     openai_api_key = StringField(required=False, default="")
     gpt_model = StringField(required=False, default="gpt-4o-mini")
     temperature = FloatField(default=0.5)
 
 
 class AnthropicSettings(EmbeddedDocument):
+    """Anthropic key and model of the tenant."""
     anthropic_api_key = StringField(required=False, default="")
     model = StringField(required=False, default="claude-sonnet")
 
 
 class GoogleLLMSettings(EmbeddedDocument):
+    """Google LLM key and model of the tenant."""
     google_api_key = StringField(required=False, default="")
     model = StringField(required=False, default="google-model")
 
 
 class WorkingHours(EmbeddedDocument):
+    """Bot hours of one weekday (HH:MM start / end, enabled)."""
     id = StringField()  # Optional ID for frontend tracking
     day = StringField(
         required=True, choices=["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
@@ -116,6 +128,7 @@ class WorkingHours(EmbeddedDocument):
 
 
 class PlatformBotSettings(EmbeddedDocument):
+    """Bot mode of one platform: always_bot, always_manual, or scheduled with working hours in a timezone."""
     platform = StringField(
         required=True,
         choices=["web", "email", "telephone", "waha"],
@@ -126,6 +139,9 @@ class PlatformBotSettings(EmbeddedDocument):
 
 
 class TenantDocument(Document):
+    """A business using Maia: channels (Twilio Voice, WAHA), LLM provider settings, bot mode per platform, features,
+    language, timezone and the connected Google Sheet. Strict: a stored document may not carry unknown fields.
+    """
     name = StringField(required=True, unique=True)
     status = StringField(default="active")
     description = StringField(default="")
@@ -133,9 +149,6 @@ class TenantDocument(Document):
     gpt_model = StringField()
     creator_email = EmailField(required=False)
     access_users = ListField(StringField())
-    # Partner ("reseller") emails that administer this tenant without being members of it:
-    # they never appear in UserDocument.permissions nor in access_users.
-    managed_by = ListField(EmailField(), default=list)
     manual_mode = BooleanField(default=False)
     # Twilio Voice credentials (call recordings); WhatsApp accounts are `waha_accounts`
     twilio_accounts = ListField(EmbeddedDocumentField(TwilioAccount))
@@ -145,7 +158,6 @@ class TenantDocument(Document):
     google_llm_settings = EmbeddedDocumentField(GoogleLLMSettings, required=False, default=GoogleLLMSettings())
     platform_bot_settings = ListField(EmbeddedDocumentField(PlatformBotSettings), default=[])
     features = ListField(EmbeddedDocumentField(FeatureTenant), default=tenant_default_features)
-    dev_url = StringField(required=False, default="")  # Optional dev backend URL override
     default_language = StringField(required=False, default="he")  # Default language for the tenant (he/en)
     default_timezone = StringField(required=False, default="Asia/Jerusalem")  # Default timezone
     owner_phone_number = StringField(required=False, default="")  # Owner phone number for notifications
@@ -155,7 +167,6 @@ class TenantDocument(Document):
         "collection": "tenant",
         "indexes": [
             {"fields": ["creator_email"]},
-            {"fields": ["managed_by"]},
         ],
     }
 
@@ -191,6 +202,9 @@ class TenantDocument(Document):
 
     @classmethod
     def get_default_feature_config(cls, feature_name: str) -> dict:
+        """Default definition of a tenant feature: default_platform (waha) and call_auto_reset (both phases on);
+        unknown names are disabled.
+        """
         if feature_name == "default_platform":
             return {"enabled": True, "meta_data": {"platform": "waha"}}
         elif feature_name == "call_auto_reset":
@@ -205,6 +219,8 @@ class TenantDocument(Document):
             return {"enabled": False, "meta_data": {}}
 
     def update_all_features(self):
+        """Backfill the known tenant features and their missing meta_data keys; returns True when something was saved.
+        """
         updated = False
         all_default_features = ["default_platform", "call_auto_reset"]
 
@@ -318,13 +334,13 @@ class TenantDocument(Document):
 
 
 class TenantCustomer(BaseModel):
+    """Reduced tenant detail returned to tenant members (API view)."""
     name: str
     status: str
     description: str
     creator_email: str
     access_users: List[str]
     manual_mode: bool
-    dev_url: Optional[str] = None
     gpt_model: Optional[str] = None
     phone_numbers: List[str] = []
     openai_settings: Optional[OpenAISettingsModel] = None

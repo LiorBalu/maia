@@ -309,6 +309,7 @@ def gpt_tool(func):
     @wraps(func)
     async def wrapper(*args, **kwargs):
         # If the function is async, await it
+        """Await the tool whether it is async or sync."""
         if inspect.iscoroutinefunction(func):
             return await func(*args, **kwargs)
         else:

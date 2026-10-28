@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class PromptPartModel(BaseModel):
+    """A part of a structured prompt (category + content, optional embedding)."""
     category: str
     content: str
     always: bool = True
@@ -31,6 +32,7 @@ class PromptPartModel(BaseModel):
 
 
 class Prompt(BaseModel):
+    """Prompt payload of the API (create / update / read)."""
     name: str
     tenant_name: str
     prompt: Optional[str] = Field(
@@ -45,10 +47,11 @@ If it's a text prompt, this field contains only the text content of the prompt.*
     prompt_type: Optional[Literal["text", "structured"]] = None
     modified_at: Optional[datetime] = datetime.now(timezone.utc)
     modified_by: Optional[str] = os.getenv("MAIA_DOCS_USER")
-    label: Optional[str] = "רםשי"
+    label: Optional[str] = "ראשי"
     max_embedding_filter_parts: Optional[int] = 3
 
     class Config:
+        """Example payload shown in the API docs."""
         json_schema_extra = {
             "example": {
                 "name": "prompt_name",
@@ -63,6 +66,7 @@ If it's a text prompt, this field contains only the text content of the prompt.*
 
 
 class PromptPart(EmbeddedDocument):
+    """A part of a structured prompt, stored in Mongo."""
     category = StringField(required=True)
     content = StringField(required=True)
     always = BooleanField(default=True)
@@ -70,6 +74,7 @@ class PromptPart(EmbeddedDocument):
 
 
 class PromptHistory(Document):
+    """A saved version of a prompt (written on every PromptDocument.save)."""
     prompt_document = ReferenceField("PromptDocument", required=True)
     name = StringField(required=True)
     tenant_name = StringField(required=True)
@@ -80,6 +85,7 @@ class PromptHistory(Document):
     modified_by = StringField(required=True)
 
     def to_dict(self):
+        """History entry as a dict for the API."""
         return {
             "id": str(self.id),
             "name": self.name,
@@ -96,6 +102,7 @@ class PromptHistory(Document):
 
 
 class PromptHistoryModel(BaseModel):
+    """Pydantic view of PromptHistory."""
     name: str
     tenant_name: str
     content: Optional[str]
@@ -106,6 +113,9 @@ class PromptHistoryModel(BaseModel):
 
 
 class PromptDocument(Document):
+    """A prompt of a tenant: default (chat), platform_realtime (phone), contextualize_q_system_prompt, hangup_call or
+    any named extra; text or structured (parts).
+    """
     name = StringField(required=True)
     label = StringField(required=False)
     tenant_name = StringField(required=True)
@@ -133,6 +143,7 @@ class PromptDocument(Document):
         return ""
 
     def save(self, *args, **kwargs):
+        """Stamp modified_at, save, and append a PromptHistory version."""
         self.modified_at = datetime.now(timezone.utc)
         super(PromptDocument, self).save(*args, **kwargs)
         PromptHistory(
@@ -147,6 +158,7 @@ class PromptDocument(Document):
         ).save()
 
     def to_dict(self):
+        """Prompt as a dict for the API (a text prompt is exposed as one Default part)."""
         if self.prompt_type == "text" and len(self.prompt_parts) == 0:
             self.prompt_parts = [PromptPart(category="Default", content=self.content, always=True)]
         return {

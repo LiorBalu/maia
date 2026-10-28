@@ -4,15 +4,14 @@ Q&A (Questions & Answers) API Routes
 This module provides endpoints for managing Q&A documents in the RAG system.
 Q&A are embedded using Cohere and stored in Qdrant for semantic search.
 
-Endpoints:
-1. POST /qa/ - Create a new Q&A
-2. GET /qa/ - List all Q&A for a tenant (with pagination)
-3. GET /qa/{qa_id} - Get single Q&A details
-4. PUT /qa/{qa_id} - Update a Q&A
-5. DELETE /qa/{qa_id} - Delete a Q&A
-6. POST /qa/search - Search in Q&A
-7. POST /qa/sync_to_qdrant - Sync all Q&A to Qdrant
-8. GET /qa/count - Get total Q&A count for a tenant
+Endpoints (all called by the dashboard's knowledge page, Q&A tab):
+1. POST /qa/ - Create a single Q&A
+2. POST /qa/bulk - Create many Q&A from a JSON list
+3. GET /qa/ - List all Q&A for a tenant (with pagination)
+4. GET /qa/count - Total / indexed / pending counts for a tenant
+5. GET /qa/categories - Categories of a tenant with counts
+6. PUT /qa/{qa_id} - Update a Q&A (re-embedded)
+7. DELETE /qa/{qa_id} - Delete a Q&A (Mongo + Qdrant)
 
 Cohere Embedding Strategy:
 - EMBED: Question field only (semantic search target)
@@ -39,6 +38,57 @@ logger = logging.getLogger(__name__)
 
 
 qa_router = APIRouter(prefix="/qa", tags=["Q&A"])
+
+
+@qa_router.post("/", response_model=QADocumentResponse)
+async def create_qa(
+    qa_data: QADocumentCreate,
+    user: dict = Security(verify_token_extended, scopes=["staff"]),
+    tenant_name: Optional[str] = Query(None),
+):
+    """
+    Create a single Q&A document and embed it in Qdrant (the dashboard's "add question" form).
+
+    The tenant comes from the query string or the body; the Q&A is embedded right away.
+    """
+    tenant = qa_data.tenant_name or tenant_name
+    if not tenant:
+        raise HTTPException(status_code=400, detail="tenant_name must be provided in query or body")
+
+    qa = QADocument(
+        tenant_name=tenant,
+        question=qa_data.question,
+        answer=qa_data.answer,
+        category=normalize_qa_category(qa_data.category),
+        metadata=qa_data.metadata,
+        is_indexed=False,
+    )
+    qa.save()
+    logger.info(f"Q&A created: {qa.id} in tenant '{tenant}'")
+
+    try:
+        from maia.knowledge.qa import create_qa_embedding
+
+        result = create_qa_embedding(str(qa.id))
+        logger.info(f"Q&A embedded: {result}")
+    except Exception as e:
+        # The Q&A is saved but stays pending (is_indexed=False); the dashboard shows it as pending.
+        logger.error(f"Error embedding Q&A {qa.id}: {e}")
+
+    qa.reload()
+
+    return QADocumentResponse(
+        id=str(qa.id),
+        tenant_name=qa.tenant_name,
+        question=qa.question,
+        answer=qa.answer,
+        category=normalize_qa_category(getattr(qa, "category", None)),
+        is_indexed=qa.is_indexed,
+        metadata=qa.metadata,
+        vector_id=qa.vector_id,
+        created_at=qa.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+        updated_at=qa.updated_at.strftime("%Y-%m-%d %H:%M:%S"),
+    )
 
 
 @qa_router.post("/bulk", response_model=dict)

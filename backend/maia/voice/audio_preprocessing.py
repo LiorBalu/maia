@@ -78,6 +78,9 @@ class CallAudioPreprocessor:
         speech_subframes_to_open: int = 2,
     ) -> None:
         # Clamp to WebRTC APM's supported ranges.
+        """Clamp the settings to the APM ranges, prepare the gate counters and the resampler state, and create the
+        WebRTC APM when any stage is on.
+        """
         self.noise_suppression = bool(noise_suppression)
         self.noise_suppression_level = max(0, min(4, int(noise_suppression_level)))
         self.auto_gain = bool(auto_gain)
@@ -154,6 +157,9 @@ class CallAudioPreprocessor:
             self._frame_latencies_us.append((time.perf_counter_ns() - _t0) // 1000)
 
     def _process_inner(self, ulaw_b64: str) -> str:
+        """The pipeline for one frame: decode mu-law, upsample, run the APM per 10 ms chunk (collecting the VAD
+        verdict), downsample, apply the VAD / RMS gate, re-encode mu-law and keep the frame size.
+        """
         try:
             ulaw_in = base64.b64decode(ulaw_b64)
         except Exception:
@@ -235,6 +241,7 @@ class CallAudioPreprocessor:
         return base64.b64encode(ulaw_out).decode("ascii")
 
     def stats_summary(self) -> str:
+        """One-line summary of the call: frames processed / gated, latency percentiles and the active settings."""
         if self.frames_processed == 0:
             return "audio-preproc: no frames processed"
         gated_pct = 100.0 * self.frames_gated / self.frames_processed
@@ -250,6 +257,7 @@ class CallAudioPreprocessor:
         )
 
     def _latency_summary(self) -> str:
+        """Per-frame processing latency: mean, p50, p95, p99 and max, in microseconds."""
         samples = self._frame_latencies_us
         if not samples:
             return "latency=n/a"
@@ -258,6 +266,7 @@ class CallAudioPreprocessor:
 
         def _pct(p: float) -> int:
             # Nearest-rank percentile — fine for call telemetry.
+            """Nearest-rank percentile of the sorted latencies."""
             idx = min(n - 1, max(0, int(round(p * (n - 1)))))
             return ordered[idx]
 
@@ -311,6 +320,7 @@ def build_preprocessor_from_settings(call_settings) -> Optional[CallAudioPreproc
     meta = getattr(feature, "meta_data", None) or {}
 
     def _get(key, default):
+        """Value of a meta_data key, or the default when it is missing or None."""
         val = meta.get(key, default)
         return default if val is None else val
 

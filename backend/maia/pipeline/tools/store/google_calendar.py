@@ -57,6 +57,7 @@ def _get_scheduling_calendars(tenant_name):
 
 
 def _build_event_window(service, cal, date: str, time: str, duration_minutes: int):
+    """Localize the requested date + time in the calendar's timezone; returns (timezone, start, end)."""
     calendar_timezone = service.calendarList().get(calendarId=cal.email).execute().get("timeZone")
     logger.info(f"[st_schedule_event] {cal.email} timezone: {calendar_timezone}")
     tz = pytz.timezone(calendar_timezone)
@@ -67,6 +68,7 @@ def _build_event_window(service, cal, date: str, time: str, duration_minutes: in
 def _is_calendar_slot_usable(
     service, cal, calendar_timezone, datetime_obj, end_datetime_obj
 ) -> tuple[bool, str | None]:
+    """Reject a slot that is in the past, outside the opening hours or busy; returns (usable, reason)."""
     if datetime_obj < datetime.now(pytz.timezone(calendar_timezone)):
         logger.info(f"[st_schedule_event] {cal.email}: REJECTED - time is in the past")
         return False, "past"
@@ -108,6 +110,9 @@ def _build_event_payload(
     datetime_obj: datetime,
     end_datetime_obj: datetime,
 ):
+    """The Google Calendar event body: title, the customer's number as location, name / email / phone in the
+    description, a Meet link, and the customer as attendee when an email is known.
+    """
     event_payload = {
         "summary": title,
         "location": request["sender_id"],
@@ -134,6 +139,7 @@ def _build_event_payload(
 def _persist_created_meeting(
     request: MessageContext, event: dict, datetime_obj: datetime, end_datetime_obj: datetime
 ) -> None:
+    """Record the booked event on the customer (meetings list) and save."""
     request["customer"].meetings.append(
         MeetingDocument(
             meeting_id=event["id"],
@@ -158,6 +164,9 @@ def _create_event_in_first_available_calendar(
     description: str,
     phone_number: str,
 ):
+    """Try the calendars in order and create the event in the first one where the slot is usable; returns ((calendar,
+    event) or None, rejection reasons).
+    """
     rejection_reasons = []
 
     for cal in calendars:
@@ -195,6 +204,7 @@ def _create_event_in_first_available_calendar(
 
 
 def _format_schedule_rejection(rejection_reasons: list[str]) -> str:
+    """Text for the model when no calendar could take the slot (past / closed / busy)."""
     if rejection_reasons and all(reason == "past" for reason in rejection_reasons):
         return "This time slot is not available because it's in the past"
     if rejection_reasons and all(reason == "closed" for reason in rejection_reasons):
@@ -203,6 +213,7 @@ def _format_schedule_rejection(rejection_reasons: list[str]) -> str:
 
 
 def _collect_user_future_events(calendars, user_location: str):
+    """(calendar, service, event) of every confirmed future event whose location is the customer's number."""
     now_google_format = datetime.now(timezone.utc).isoformat() + "Z"
     filtered_pairs = []
 
@@ -239,6 +250,7 @@ def _find_customer_event_at(calendars, user_location: str, start_dt: datetime):
 
 
 def _mark_customer_meeting_cancelled(customer, event_id: str) -> None:
+    """Set the status of the customer's stored meeting to cancelled."""
     for meeting in customer.meetings:
         if meeting.meeting_id == event_id:
             meeting.status = "cancelled"
@@ -247,12 +259,14 @@ def _mark_customer_meeting_cancelled(customer, event_id: str) -> None:
 
 
 def _delete_calendar_event(cal, service, event_to_cancel, customer) -> None:
+    """Delete the event from Google Calendar and mark the customer's meeting cancelled."""
     service.events().delete(calendarId=cal.email, eventId=event_to_cancel["id"]).execute()
     logger.info(f"[st_cancel_event] Event deleted in {cal.email}: {event_to_cancel.get('htmlLink')}")
     _mark_customer_meeting_cancelled(customer, event_to_cancel["id"])
 
 
 def _find_calendar_event(calendars, event_id: str):
+    """Look an event id up in each calendar; returns (calendar, service, event), or Nones."""
     for cal in calendars:
         service = get_calendar_service(cal.access_token, cal.refresh_token)
         try:
@@ -266,6 +280,7 @@ def _find_calendar_event(calendars, event_id: str):
 
 
 def _build_reschedule_window(target_service, target_cal, new_date: str, new_time: str, duration_minutes: int):
+    """Localize the new date + time in the target calendar's timezone; returns (timezone, start, end)."""
     calendar_timezone = target_service.calendarList().get(calendarId=target_cal.email).execute().get("timeZone")
     tz = pytz.timezone(calendar_timezone)
     datetime_obj = tz.localize(datetime.strptime(new_date + "T" + new_time, GOOGLE_DATETIME_FORMAT))
@@ -275,6 +290,7 @@ def _build_reschedule_window(target_service, target_cal, new_date: str, new_time
 def _validate_reschedule_slot(
     target_service, target_cal, calendar_timezone, datetime_obj, end_datetime_obj
 ) -> str | None:
+    """Message for the model when the new slot is outside the opening hours or busy; None when it is free."""
     if target_cal.opening_hours:
         starts_open = is_within_opening_hours(datetime_obj, target_cal.opening_hours)
         ends_open = is_within_opening_hours(end_datetime_obj, target_cal.opening_hours)
@@ -294,6 +310,7 @@ def _validate_reschedule_slot(
 
 
 def _update_customer_rescheduled_meeting(customer, event_id: str, datetime_obj, end_datetime_obj) -> None:
+    """Update the times of the customer's stored meeting after a reschedule."""
     for meeting in customer.meetings:
         if meeting.meeting_id == event_id:
             meeting.start_time = datetime_obj.strftime(GOOGLE_DATETIME_FORMAT)
@@ -306,6 +323,7 @@ def _update_customer_rescheduled_meeting(customer, event_id: str, datetime_obj, 
 def _apply_calendar_reschedule(
     target_service, target_cal, event_id: str, event: dict, calendar_timezone: str, datetime_obj, end_datetime_obj
 ):
+    """Write the new start / end on the Google Calendar event."""
     event["start"] = {"dateTime": datetime_obj.strftime(GOOGLE_DATETIME_FORMAT), "timeZone": calendar_timezone}
     event["end"] = {"dateTime": end_datetime_obj.strftime(GOOGLE_DATETIME_FORMAT), "timeZone": calendar_timezone}
     return target_service.events().update(calendarId=target_cal.email, eventId=event_id, body=event).execute()
@@ -881,6 +899,7 @@ def _get_availability_union(calendars, date_from, time_from, date_to, time_to):
 
 
 def _simplify_slot_structure(slot_list):
+    """(start, end) datetimes to {date, start, end} strings the model can read."""
     return [
         {"date": start.strftime("%d-%m-%Y"), "start": start.strftime("%H:%M"), "end": end.strftime("%H:%M")}
         for start, end in slot_list

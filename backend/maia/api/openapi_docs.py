@@ -1,4 +1,4 @@
-"""OpenAPI schema and Swagger / RapiDoc / Scalar pages behind Basic Auth; the tenant enum is filled from the DB."""
+"""OpenAPI schema and the Swagger UI page behind Basic Auth; the tenant enum is filled from the DB."""
 
 import copy
 
@@ -53,19 +53,5 @@ async def get_staff_openapi(request: Request, user=Depends(verify_basic_auth)):
 
 @router.get("/docs", include_in_schema=False)
 async def get_docs(user=Depends(verify_basic_auth)):
+    """Swagger UI page, behind Basic Auth."""
     return get_swagger_ui_html(openapi_url="/openapi.json", title="Maia API docs")
-
-
-# ---------------------------------------------------------------------------
-# RapiDoc — standard (sidebar layout, persistent auth)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# RapiDoc — focused render style (modern single-endpoint view)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Scalar — modern design, native OAuth2 password flow, built-in request history
-# ---------------------------------------------------------------------------

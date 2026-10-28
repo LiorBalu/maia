@@ -14,6 +14,7 @@ async def get_agents(
     tenant_name: str,
     user: dict = Security(verify_token_extended, scopes=["staff"]),
 ):
+    """List the tenant's agents (LLM configurations), newest first."""
     agents = AgentDocument.objects(tenant_name=tenant_name).order_by("-created_at")
     return [
         AgentResponse(
@@ -42,6 +43,7 @@ async def create_agent(
     request: AgentCreateRequest,
     user: dict = Security(verify_token_extended, scopes=["staff"]),
 ):
+    """Create an agent for the tenant; the name must be unique. Saving an active agent deactivates the others."""
     existing = AgentDocument.objects(tenant_name=tenant_name, name=request.name).first()
     if existing:
         raise HTTPException(status_code=400, detail="An agent with this name already exists.")
@@ -87,6 +89,7 @@ async def update_agent(
     request: AgentCreateRequest,
     user: dict = Security(verify_token_extended, scopes=["staff"]),
 ):
+    """Replace every field of an existing agent with the request values."""
     agent = AgentDocument.objects(id=agent_id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found.")
@@ -126,6 +129,7 @@ async def delete_agent(
     agent_id: str,
     user: dict = Security(verify_token_extended, scopes=["staff"]),
 ):
+    """Delete an agent by id."""
     agent = AgentDocument.objects(id=agent_id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found.")

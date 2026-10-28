@@ -5,6 +5,7 @@ from typing import Optional
 
 
 def get_time_of_day(current_datetime: Optional[datetime] = None) -> str:
+    """morning / noon / afternoon / evening / night for a datetime (now by default)."""
     current_time = (current_datetime or datetime.now(timezone.utc)).time()
 
     if time(5, 0) <= current_time < time(12, 0):

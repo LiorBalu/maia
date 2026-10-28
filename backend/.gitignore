@@ -16,8 +16,6 @@ credential*
 # Local data and runtime output
 mongo_data/
 waha_sessions/
-static/*
-!static/favicon.ico
 call_logs/
 celerybeat-schedule
 
@@ -28,4 +26,3 @@ celerybeat-schedule
 
 # Local compose files
 docker-compose.yml
-docker-compose.local.override.yml

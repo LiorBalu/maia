@@ -47,6 +47,9 @@ def _create_wrapped_function(original_func, request):
     @wraps(original_func)
     async def wrapper(**kwargs):
         # Generate a unique call_id for this tool call
+        """Run the tool for LangChain: save the call as a tool_calls message, call the original function with the
+        injected request, store the result in request[tool_results], save the tool message and log the call.
+        """
         import uuid
 
         call_id = str(uuid.uuid4())

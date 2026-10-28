@@ -32,6 +32,7 @@ class SheetAccessError(Exception):
 
 @dataclass
 class SheetData:
+    """Title, headers and rows of the first tab of a sheet."""
     title: str
     headers: list[str]
     rows: list[dict[str, str]]
@@ -56,6 +57,7 @@ def extract_sheet_id(url_or_id: str) -> str | None:
 
 
 def _sheets_service():
+    """Sheets API client authenticated with the service account."""
     credentials = service_account.Credentials.from_service_account_file(SERVICE_KEY_PATH, scopes=SCOPES)
     return build("sheets", "v4", credentials=credentials, cache_discovery=False)
 

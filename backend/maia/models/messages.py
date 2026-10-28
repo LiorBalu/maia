@@ -1,4 +1,4 @@
-"""Messages exchanged in a conversation (user, assistant, tool, manager), call messages and conversation summaries."""
+"""Messages exchanged in a conversation (user, assistant, tool, manager)."""
 
 import logging
 from datetime import datetime, timezone
@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 
 
 class MessageDocument(Document):
+    """One message of a conversation: role (user / assistant / manager / tool / tool_calls), text, media, the
+    platform's id (sid) and meta_data (thread, sources, usage...).
+    """
     tenant_name = StringField(required=False)
     platform = StringField(required=True, default="waha")
     phone_number = StringField(required=False)
@@ -45,6 +48,7 @@ class MessageDocument(Document):
     }
 
     def to_dict(self):
+        """Message as a dict for the API, with a display name per role and the inferred channel / entity."""
         from bson import ObjectId
 
         def serialize_value(value):
@@ -97,6 +101,10 @@ class MessageDocument(Document):
         }
 
     def save(self, *args, **kwargs):
+        """Attach the message to the customer's online conversation of its platform (created when missing), then
+        update the conversation: last message date, unread + unresolved on a user message, read on a manager
+        message.
+        """
         self.date = self.date if self.date else datetime.now(timezone.utc)
 
         conv = None
@@ -119,7 +127,6 @@ class MessageDocument(Document):
                     platform=self.platform,
                     date=datetime.now(timezone.utc),
                     conversation_status="online",
-                    is_group=self.meta_data.get("is_group_message", False),
                 )
                 conv.save()
             self.conversation_id = str(conv.id)

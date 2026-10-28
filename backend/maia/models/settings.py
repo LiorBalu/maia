@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 
 class FeatureSettingsModel(Model):
+    """A feature flag of the chat / call settings as the API sees it: enabled, meta_data (its parameters), options and
+    help texts.
+    """
     name: str
     enabled: bool = False
     meta_data: Dict = Field(default={})
@@ -42,6 +45,7 @@ class ChatSettings(BaseModel):
 
 
 class FeatureSettings(EmbeddedDocument):
+    """A feature flag stored inside the chat / call settings."""
     name = StringField(required=True)
     enabled = BooleanField(default=False)
     meta_data = DictField(default={})
@@ -53,6 +57,7 @@ class FeatureSettings(EmbeddedDocument):
 
 
 class ChatSettingsDocument(Document):
+    """Chat settings of a tenant: the human-like delay and the feature flags (image_to_text)."""
     tenant_name = StringField(required=True)
     chatbot_human_like_delay = BooleanField(default=False)
     chatbot_human_like_time = IntField(default=0)
@@ -60,6 +65,7 @@ class ChatSettingsDocument(Document):
     meta = {"collection": "chat_settings"}
 
     def get_feature(self, feature_name: str) -> FeatureSettings:
+        """The feature by name; a missing one is created from its default config and saved."""
         feature = next((feature for feature in self.features if feature.name == feature_name), None)
         if not feature:
             default_config = self.get_default_feature_config(feature_name)
@@ -79,13 +85,14 @@ class ChatSettingsDocument(Document):
 
     @classmethod
     def get_default_feature_config(cls, feature_name: str) -> dict:
+        """Default definition of a chat feature (image_to_text); unknown names get a disabled stub."""
         default_configs = {
             "image_to_text": {
                 "enabled": False,
                 "meta_data": {},
                 "options": {},
                 "description": "Convert images to text using OCR",
-                "he_description": "המרת תמונות לטקסט בםמצעות OCR",
+                "he_description": "המרת תמונות לטקסט באמצעות OCR",
             },
         }
 
@@ -101,6 +108,8 @@ class ChatSettingsDocument(Document):
         )
 
     def update_all_features(self):
+        """Backfill the known chat features and their options / descriptions; returns True when something was saved.
+        """
         updated = False
         all_default_features = ["image_to_text"]
 
@@ -157,6 +166,9 @@ class ChatSettingsDocument(Document):
             return False
 
 class realtimeConfModel(EmbeddedModel):
+    """Realtime session tuning (odmantic / API view): VAD threshold, padding, silence, transcription model and
+    language, noise reduction.
+    """
     threshold: float = Field(
         default=0.4, ge=0.0, le=1.0, description="Threshold for real-time voice activity detection"
     )
@@ -173,6 +185,7 @@ class realtimeConfModel(EmbeddedModel):
 
 
 class CallSettings(Model):
+    """Call settings as the API sees them (odmantic model)."""
     tenant_name: str
     phone_number: str = ""
     representative_phone_number: str = ""
@@ -185,6 +198,7 @@ class CallSettings(Model):
 
 
 class RealtimeConf(EmbeddedDocument):
+    """Realtime session tuning stored in Mongo (VAD, transcription, noise reduction)."""
     threshold: float = FloatField(
         default=0.4, min_value=0.0, max_value=1.0, description="Threshold for real-time voice activity detection"
     )
@@ -203,6 +217,9 @@ class RealtimeConf(EmbeddedDocument):
 
 
 class CallSettingsDocument(Document):
+    """Call settings of a tenant: the business number, the Realtime voice / speed / tuning and the feature flags
+    (noise_suppression).
+    """
     tenant_name = StringField(required=True)
     phone_number = StringField(default="")
     representative_phone_number = StringField(default="")
@@ -217,6 +234,7 @@ class CallSettingsDocument(Document):
     meta = {"collection": "call_settings", "strict": False}
 
     def get_feature(self, feature_name: str) -> FeatureSettings:
+        """The feature by name; a missing one is created from its default config and saved."""
         feature = next((feature for feature in self.features if feature.name == feature_name), None)
         if not feature:
             default_config = self.get_default_feature_config(feature_name)
@@ -234,6 +252,9 @@ class CallSettingsDocument(Document):
 
     @classmethod
     def get_default_feature_config(cls, feature_name: str) -> dict:
+        """Default definition of a call feature (noise_suppression with its tuning, options and help texts); unknown
+        names get a disabled stub.
+        """
         default_configs = {
             "noise_suppression": {
                 "enabled": False,
@@ -319,6 +340,9 @@ class CallSettingsDocument(Document):
         )
 
     def update_all_features(self):
+        """Backfill the known call features: missing meta_data keys, options, help texts and descriptions; returns
+        True when something was saved.
+        """
         updated = False
         all_default_features = ["noise_suppression"]
 

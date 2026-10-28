@@ -15,6 +15,7 @@ customer_router = APIRouter(prefix="/customers", tags=["Customers/Clients"])
 
 
 class CustomerStatusUpdateRequest(BaseModel):
+    """Body of the reply_mode update: AI, agent or blocked."""
     reply_mode: str
 
 
@@ -25,6 +26,9 @@ async def update_customer_status(
     phone_number: str,
     user: User = Depends(authenticate_user_token),
 ):
+    """Switch a customer between AI replies and manual handling; going back to AI also clears the agent_requested
+    flag.
+    """
     customer_doc = CustomerDocument.objects(phone_number=phone_number, tenant_name=tenant_name).first()
     if not customer_doc:
         return JSONResponse(status_code=404, content={"message": "Customer not found"})

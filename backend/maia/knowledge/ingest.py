@@ -2,7 +2,6 @@
 
 
 import logging
-from os import getenv
 from typing import Any, Dict
 
 # LangChain 1.0 imports - functions moved to langchain_classic
@@ -27,22 +26,6 @@ from maia.utils.read_pdf import read_pdf
 from maia.utils.read_word import read_word
 
 logger = logging.getLogger(__name__)
-# Redis client for session management (chat history).
-try:
-    from maia.services.redis_clients import get_sync_redis
-
-    redis_client = get_sync_redis(decode_responses=False)
-except Exception:
-    # Will be handled when actually needed
-    redis_client = None
-
-
-REDIS_URL = getenv("REDIS_URL", "redis://localhost:6379")
-# Qdrant configuration - supports both local and cloud
-QDRANT_URL = getenv("QDRANT_URL")  # For cloud: https://xxx.qdrant.io
-QDRANT_API_KEY = getenv("QDRANT_API_KEY")  # For cloud authentication
-QDRANT_HOST = getenv("QDRANT_HOST", "localhost")  # For local: localhost
-QDRANT_PORT = int(getenv("QDRANT_PORT", "6333"))  # For local: 6333
 
 
 def load_document_with_langchain(file_path_or_url: str) -> str:

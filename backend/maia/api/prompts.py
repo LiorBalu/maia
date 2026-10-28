@@ -17,6 +17,7 @@ prompts_router = APIRouter(prefix="/prompts", tags=["Prompts"])
 
 @prompts_router.get("/history/{tenant_name}", response_model=List[PromptHistoryModel])
 async def get_prompts_history(tenant_name: str, user: User = Depends(authenticate_user_token)):
+    """Every saved version of the tenant's prompts (PromptHistory)."""
     prompts = PromptHistory.objects(tenant_name=tenant_name)
 
     return [prompt.to_dict() for prompt in prompts]
@@ -24,6 +25,7 @@ async def get_prompts_history(tenant_name: str, user: User = Depends(authenticat
 
 @prompts_router.post("", response_model=Prompt)
 async def create_prompt(prompt: Prompt, user: User = Depends(authenticate_user_token)):
+    """Create a prompt for a tenant; the name must be unique within the tenant."""
     if prompt.name == "":
         raise HTTPException(status_code=400, detail="Prompt name are required")
     if PromptDocument.objects(name=prompt.name, tenant_name=prompt.tenant_name).first():
@@ -45,6 +47,7 @@ async def create_prompt(prompt: Prompt, user: User = Depends(authenticate_user_t
 
 @prompts_router.get("/{tenant_name}", response_model=List[Prompt])
 async def get_prompts(tenant_name: str, user: User = Depends(authenticate_user_token)):
+    """All prompts of the tenant."""
     prompts = PromptDocument.objects(tenant_name=tenant_name)
     return [prompt.to_dict() for prompt in prompts]
 

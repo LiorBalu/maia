@@ -1,3 +1,7 @@
+"""Celery application of Maia: knowledge indexing (document parts, URL scraping, Cohere embeddings), Gmail watch
+renewal, SSE cleanup and the deferred WAHA disconnect check.
+"""
+
 import asyncio
 import logging
 from os import getenv
@@ -40,6 +44,7 @@ class CeleryTaskFilter(logging.Filter):
 
     def filter(self, record):
         # Only filter INFO level messages
+        """Drop INFO lines that mention one of FILTERED_TASKS; keep every other record."""
         if record.levelno != logging.INFO:
             return True
 
@@ -123,7 +128,7 @@ celery_app.conf.update(
     # Prevent workers from hoarding ETA tasks in memory. Default (4) causes the
     # worker to prefetch 4×concurrency messages at once; with many ETA tasks in the
     # queue this fills the worker's in-memory scheduler and delays time-sensitive
-    # callbacks (scheduled_callback_call) behind hundreds of timeout tasks.
+    # tasks (the deferred WAHA session check) behind hundreds of queued ETA tasks.
     worker_prefetch_multiplier=1,
 )
 
@@ -177,6 +182,9 @@ def renew_gmail_watches_task():
 
 @celery_app.task
 def index_document_task(document_id: str):
+    """Celery task: split a knowledge document into parts and schedule their embeddings (see
+    maia/knowledge/ingest.py).
+    """
     from maia.knowledge.ingest import create_embedding_parts_for_document
 
     create_embedding_parts_for_document(document_id)
@@ -186,6 +194,7 @@ def index_document_task(document_id: str):
 def index_url_task(
     document_id: str, url: str, max_depth: int = 3, max_pages: int = 500, same_domain_only: bool = True
 ):
+    """Celery task: scrape a website into a knowledge document, then index it."""
     from maia.knowledge.web_pages import scrape_url_and_embed
 
     scrape_url_and_embed(document_id, url, max_depth, max_pages, same_domain_only)
@@ -199,6 +208,9 @@ def cleanup_sse_connections_task():
     """
 
     async def _cleanup():
+        """Async body of the task: reconnect the SSE manager if needed, drop connections idle for more than 10
+        minutes, log the count left.
+        """
         from maia.api.sse_manager import redis_sse_manager
 
         try:
@@ -373,15 +385,3 @@ def check_waha_session_task(tenant_name: str, phone_number: str):
         return {"checked": True, "status": status, "notified": notified}
     finally:
         redis_client.delete(pending_key)
-
-
-# --- Customer Celery tasks auto-discovery -----------------------------------
-# Imports every tenants/*/celery_tasks.py, registers their @tenant_task functions
-# on celery_app and merges their beat entries. Runs last, after the static
-# beat_schedule above, so customer entries are added and never overwrite it.
-try:
-    from tenants.task_discovery import discover_tenant_tasks
-
-    celery_app.conf.beat_schedule.update(discover_tenant_tasks(celery_app))
-except Exception as e:
-    logger.error(f"Error during customer celery tasks auto-discovery: {e}")

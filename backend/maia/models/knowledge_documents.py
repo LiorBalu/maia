@@ -41,6 +41,7 @@ class EmbeddedPart(Document):
     }
 
     def save(self, *args, **kwargs):
+        """Stamp created_at / updated_at."""
         if not self.created_at:
             self.created_at = datetime.utcnow()
         self.updated_at = datetime.utcnow()
@@ -48,6 +49,9 @@ class EmbeddedPart(Document):
 
 
 class EmbeddedDocument(Document):
+    """A knowledge document of a tenant (uploaded file or scraped site): title, source URL, categories, private flag
+    and indexing state; its chunks are EmbeddedPart documents.
+    """
     tenant_name = StringField(required=True)
     title = StringField(required=True)
     content = StringField()
@@ -64,6 +68,7 @@ class EmbeddedDocument(Document):
     meta = {"collection": "knowledge_documents"}
 
     def save(self, *args, **kwargs):
+        """Stamp created_at / updated_at."""
         if not self.created_at:
             self.created_at = datetime.utcnow()
         self.updated_at = datetime.utcnow()
@@ -71,6 +76,7 @@ class EmbeddedDocument(Document):
 
 
 class EmbeddedPartResponse(BaseModel):
+    """A document part as returned by the API."""
     id: Optional[str] = Field(None)
     part_number: int
     content: str

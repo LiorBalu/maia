@@ -20,10 +20,6 @@ logger = logging.getLogger(__name__)
 WAHA_WEBHOOK_EVENTS = [
     "message.any",
     "session.status",
-    "poll.vote",
-    "poll.vote.failed",
-    "engine.event",
-    "call.received",
 ]
 
 
@@ -83,7 +79,13 @@ def pick_waha_server_url() -> str | None:
 
 
 class WahaService:
+    """HTTP client of one WAHA session (the tenant's connected WhatsApp number): session lifecycle, QR, status,
+    sending text and files, LID resolution.
+    """
     def __init__(self, tenant_name: str, phone_number: str, **kwargs):
+        """Resolve the account of the number (falling back to the tenant's sole account) and its WAHA server; needs
+        WAHA_API_KEY.
+        """
         self.tenant_name = tenant_name
         self.phone_number = phone_number
         self.api_key = getenv("WAHA_API_KEY", "")
@@ -113,9 +115,9 @@ class WahaService:
 
         account = tenant.get_waha_by_phone_number(self.phone_number)
         if not account:
-            # The connection key must be the connected account number. Group JIDs
-            # (and occasionally recipient numbers) leak into this slot from the
-            # message pipeline — they never identify an account. When the tenant has
+            # The connection key must be the connected account number. Occasionally a
+            # recipient number leaks into this slot from the message pipeline and it
+            # never identifies an account. When the tenant has
             # a single connected account, fall back to it so the reply is still
             # delivered instead of failing with a 404 and dropping the AI response.
             accounts = tenant.waha_accounts or []
@@ -129,6 +131,7 @@ class WahaService:
         return account
 
     def _url(self, endpoint: str) -> str:
+        """Full URL of a WAHA endpoint on this account's server."""
         return f"{self.base_url}{endpoint}"
 
     def _headers(self) -> dict:
@@ -273,19 +276,11 @@ class WahaService:
 
         return response.json()
 
-    def _fake_group_sid(self, phone_number: str, force_send_to_group: bool) -> dict | None:
-        if len(phone_number) <= 15 or force_send_to_group is not False:
-            return None
-        logger.info(f"Cannot send message to group: {phone_number} (force_send_to_group=False)")
-        fake_sid = f"fake_sid_{str(uuid.uuid4())}"
-        return {"sid": fake_sid}
-
     def _format_chat_id(self, phone_number: str) -> str:
+        """Phone number to WhatsApp chat id (number@c.us), unless it already is one."""
         if "@" in phone_number:
             return phone_number
-        if len(phone_number) < 15:
-            return f"{phone_number}@c.us"
-        return f"{phone_number}@g.us"
+        return f"{phone_number}@c.us"
 
     @staticmethod
     def _extract_sent_message_id(result: dict) -> str:
@@ -311,9 +306,10 @@ class WahaService:
             return rid
         return str(uuid.uuid4())
 
-    def _send_media_urls(
-        self, phone_number: str, message: str, media_urls: list[str], force_send_to_group: bool
-    ) -> list:
+    def _send_media_urls(self, phone_number: str, message: str, media_urls: list[str]) -> list:
+        """Send each media URL found in the reply as a file; the cleaned text becomes the caption of the first one.
+        Returns the sids.
+        """
         media_sids = []
         caption = message.strip()
         for index, media_url in enumerate(media_urls):
@@ -322,7 +318,6 @@ class WahaService:
                     phone_number=phone_number,
                     message=caption if index == 0 else "",
                     media_url=media_url,
-                    force_send_to_group=force_send_to_group,
                 )
                 media_sids.append(media_result.get("sid"))
                 logger.info(f"Media sent successfully: {media_url}")
@@ -342,10 +337,6 @@ class WahaService:
         payload = {"chatId": phone_number, "text": message, "session": self.phone_number}
         if not link_preview:
             payload["linkPreview"] = False
-        if "@g.us" in phone_number:
-            mentions = self.extract_mentions(message)
-            if mentions:
-                payload["mentions"] = mentions
 
         response = requests.post(self._url("/api/sendText"), json=payload, headers=self._headers())
         if response.status_code not in [200, 201]:
@@ -356,17 +347,11 @@ class WahaService:
 
     def send_whatsapp_message(self, phone_number: str, message: str, **kwargs) -> dict:
         """Send WhatsApp message
-        Right now, cannot send message in the group
-        If @phone_number in message and its length > 15, we consider it a mention to a group
         Automatically detects and sends media files if URLs are found in message
         """
         # Skip if phone number looks like an unresolved LID
         if "@lid" in str(phone_number):
             raise HTTPException(status_code=400, detail="Cannot send message to unresolved LID")
-
-        force_send_to_group = kwargs.get("force_send_to_group", False)
-        if fake_response := self._fake_group_sid(phone_number, force_send_to_group):
-            return fake_response
 
         media_urls = _extract_media_urls(message)
         if media_urls:
@@ -376,7 +361,7 @@ class WahaService:
 
         # When send_whatsapp_message receives text that includes media URLs,
         # send the first media with the cleaned text as a WAHA caption.
-        media_sids = self._send_media_urls(phone_number, message, media_urls, force_send_to_group)
+        media_sids = self._send_media_urls(phone_number, message, media_urls)
         if media_sids:
             primary_sid = media_sids[0]
             return {"sid": primary_sid, "fake_sid": primary_sid, "media_sids": media_sids, "text_sid": None}
@@ -385,23 +370,6 @@ class WahaService:
         primary_sid = text_sid if text_sid else (media_sids[0] if media_sids else str(uuid.uuid4()))
 
         return {"sid": primary_sid, "fake_sid": primary_sid, "media_sids": media_sids, "text_sid": text_sid}
-
-    def extract_mentions(self, message):
-        mentions = []
-        words = message.split()
-        for word in words:
-            # Look for @phone_number pattern (@ followed by digits)
-            if word.startswith("@") and len(word) > 1:
-                # Extract the phone number (remove the @)
-                phone = word[1:].strip()
-                # Remove any non-digit characters except + at the start
-                phone = "".join(c for c in phone if c.isdigit() or (c == "+" and phone.index(c) == 0))
-
-                if phone and len(phone) >= 10:  # Valid phone number length
-                    # Transform to WhatsApp format: phone_number@c.us
-                    mention_id = f"{phone}@c.us"
-                    mentions.append(mention_id)
-        return mentions
 
     # Known media file extensions
     MEDIA_EXTENSIONS = {
@@ -456,17 +424,12 @@ class WahaService:
     # Patterns for cloud storage sharing URLs that need conversion
     _GDRIVE_FILE_RE = r"drive\.google\.com/file/d/([a-zA-Z0-9_-]+)"
     _GDRIVE_OPEN_RE = r"drive\.google\.com/open\?id=([a-zA-Z0-9_-]+)"
-    _DROPBOX_RE = r"dropbox\.com/"
-    _ONEDRIVE_RE = r"1drv\.ms/|onedrive\.live\.com/"
 
     @staticmethod
     def _to_direct_download_url(url: str) -> str:
         """Convert cloud-storage sharing URLs to direct-download equivalents.
 
-        Supported services:
-        - Google Drive  (/file/d/ID/view  or  /open?id=ID)
-        - Dropbox       (?dl=0 → ?dl=1)
-        - OneDrive      (?download=1 appended)
+        Supported service: Google Drive (/file/d/ID/view  or  /open?id=ID).
 
         Returns the original URL unchanged if no conversion applies.
         """
@@ -480,38 +443,19 @@ class WahaService:
         if m:
             return f"https://drive.google.com/uc?export=download&id={m.group(1)}"
 
-        # --- Dropbox ---
-        if "dropbox.com/" in url:
-            if "dl=0" in url:
-                return url.replace("dl=0", "dl=1")
-            elif "dl=1" not in url:
-                sep = "&" if "?" in url else "?"
-                return f"{url}{sep}dl=1"
-
-        # --- OneDrive / 1drv.ms ---
-        if "1drv.ms/" in url or "onedrive.live.com/" in url:
-            if "download=1" not in url:
-                sep = "&" if "?" in url else "?"
-                return f"{url}{sep}download=1"
-
         return url
 
     def _is_cloud_storage_url(self, url: str) -> bool:
         """Return True if the URL is a known cloud-storage sharing link."""
         import re
 
-        return bool(
-            re.search(self._GDRIVE_FILE_RE, url)
-            or re.search(self._GDRIVE_OPEN_RE, url)
-            or re.search(self._DROPBOX_RE, url)
-            or re.search(self._ONEDRIVE_RE, url)
-        )
+        return bool(re.search(self._GDRIVE_FILE_RE, url) or re.search(self._GDRIVE_OPEN_RE, url))
 
     def extract_media_urls(self, message: str) -> list:
         """Extract media URLs from message (images, videos, documents).
 
         Detection works in three passes:
-        1. Known cloud-storage sharing URLs (Google Drive, Dropbox, OneDrive)
+        1. Known cloud-storage sharing URLs (Google Drive)
            are accepted immediately — they always point to a file.
         2. URLs with a known media extension are matched instantly (no HTTP call).
         3. All remaining URLs are probed with a HEAD request; if the Content-Type
@@ -655,23 +599,11 @@ class WahaService:
         - /api/sendFile for documents (pdf, doc, docx, xls, xlsx, etc.)
 
         Supports both URL and base64 formats.
-        Right now, cannot send message in the group
         """
         import base64
         import re
 
-        force_send_to_group = kwargs.get("force_send_to_group", False)
-        phone_clean = phone_number.replace("@c.us", "")
-        if len(phone_clean) > 15 and force_send_to_group is False:
-            logger.info(f"Cannot send file to group: {phone_number} (force_send_to_group=False)")
-            fake_sid = f"fake_sid_{str(uuid.uuid4())}"
-            return {"sid": fake_sid}
-
-        if "@" not in phone_number:
-            if len(phone_number) < 15:
-                phone_number = f"{phone_number}@c.us"
-            else:
-                phone_number = f"{phone_number}@g.us"
+        phone_number = self._format_chat_id(phone_number)
 
         # Detect if it's base64 data
         is_base64 = False
@@ -818,16 +750,6 @@ class WahaService:
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to send {file_type} via {endpoint}: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Failed to send {file_type}: {str(e)}")
-
-    def get_group_info(self, group_id: str) -> dict:
-        """Get group info"""
-        url = self._url(f"/api/{self.phone_number}/groups/{group_id}")
-        response = requests.get(url, headers=self._headers())
-        try:
-            return response.json()
-        except Exception as e:
-            logger.error(f"Error getting group info: {e}")
-            return {}
 
     def get_phone_number_by_lid(self, lid: str) -> dict:
         """Get phone number by LID"""

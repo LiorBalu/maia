@@ -8,7 +8,6 @@ from uuid import uuid4
 
 import requests
 
-from maia.models.customers import CustomerDocument
 from maia.models.conversations import Conversation
 from maia.models.settings import ChatSettingsDocument
 from maia.utils.read_csv import read_csv
@@ -23,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SaveResponse:
+    """What a save handler returns to the dispatcher: who to answer (user_id) and how; an empty response means no
+    reply.
+    """
     tenant_name: Optional[str] = None
     delay: Optional[int] = None
     user_id: Optional[str] = None
@@ -32,34 +34,17 @@ class SaveResponse:
 
 
 def retrieve_human_delay_setting(chat_settings: ChatSettingsDocument) -> int:
+    """Seconds the bot waits before answering (0 when the human-like delay is off)."""
     return chat_settings.chatbot_human_like_time if chat_settings.chatbot_human_like_delay else 0
 
 
 def get_or_create_chat_settings(tenant_name):
+    """The tenant's chat settings, created with defaults when missing."""
     chat_settings = ChatSettingsDocument.objects(tenant_name=tenant_name).first()
     if not chat_settings:
         chat_settings = ChatSettingsDocument(tenant_name=tenant_name)
         chat_settings.save()
     return chat_settings
-
-
-def update_customer_status_on_unsubscribe(message: Optional[str], customer: CustomerDocument):
-    if message and message.lower() in [
-        "remove me",
-        "delete me",
-        "unsubscribe",
-        "הסר אותי",
-        "מחק אותי",
-        "הסר",
-        "מחק",
-        "stop",
-        "delete",
-        "remove",
-    ]:
-        customer.status = "לא מאושר דיוור"
-        customer.save()
-        return "Customer status updated"
-    return None
 
 
 def handle_audio_message(media_url, message_type, tenant_name) -> Optional[str]:
@@ -87,6 +72,9 @@ def extract_text_from_media(
     message_content_type: str,
     chat_settings: ChatSettingsDocument,
 ) -> Optional[str]:
+    """Text of an attached file for the model: DOCX, XLSX, CSV, TXT, and images through OCR when the image_to_text
+    feature is on; a video only gets a note.
+    """
     file_text = ""
     if (
         message_content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -109,37 +97,6 @@ def extract_text_from_media(
     return file_text
 
 
-def get_or_create_conversation_for_thread_id(tenant_name: str, phone_number: str, platform: str, thread_id: str) -> str:
-    """
-    Find the conversation tagged with thread_id, or create a new dedicated one.
-    This guarantees that each thread_id always routes to its own conversation,
-    even when the thread_id changes mid-session.
-    Returns the conversation_id (str).
-    """
-    from datetime import datetime, timezone
-
-    if not thread_id:
-        return None
-    conv = Conversation.objects(
-        tenant_name=tenant_name,
-        phone_number=phone_number,
-        meta_data__thread_id=thread_id,
-    ).first()
-    if conv:
-        return str(conv.id)
-    # No conversation yet for this thread_id — create one tagged with it.
-    conv = Conversation(
-        tenant_name=tenant_name,
-        phone_number=phone_number,
-        platform=platform,
-        date=datetime.now(timezone.utc),
-        conversation_status="online",
-        meta_data={"thread_id": thread_id},
-    )
-    conv.save()
-    return str(conv.id)
-
-
 def ensure_thread_id_in_conversation(conversation_id: str, thread_id: str):
     """
     After a message is saved, make sure its conversation has thread_id stored in meta_data
@@ -160,12 +117,8 @@ def ensure_thread_id_in_conversation(conversation_id: str, thread_id: str):
             if existing != thread_id:
                 conv.meta_data["thread_id"] = thread_id
                 conv._mark_as_changed("meta_data")
-                if thread_id not in [tg.name for tg in conv.tags]:
-                    from maia.models.conversations import Tag
-
-                    conv.tags.append(Tag(name=thread_id))
                 conv.save()
-                logger.info(f"[thread] Tagged conversation {conversation_id} with thread_id={thread_id}")
+                logger.info(f"[thread] Stored thread_id={thread_id} on conversation {conversation_id}")
     except Exception as e:
         logger.error(f"Failed to store thread_id in conversation: {e}")
 

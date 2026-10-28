@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 
 class MeetingDocument(EmbeddedDocument):
+    """An appointment the bot booked for the customer (Google Calendar event id, link, times, status)."""
     meeting_id = StringField(required=True)
     meeting_url = StringField(required=True)
     start_time = DateTimeField(required=True)
@@ -26,6 +27,9 @@ class MeetingDocument(EmbeddedDocument):
 
 
 class CustomerDocument(Document):
+    """An end user of a tenant: phone / email key, name, platform, reply mode (AI / agent / blocked), meetings, notes
+    and free-form meta_data.
+    """
     tenant_name = StringField(required=True)
     name = StringField(required=True, default="")
     phone_number = StringField()
@@ -44,6 +48,7 @@ class CustomerDocument(Document):
     meta = {"collection": "customers"}
 
     def to_dict(self) -> dict:
+        """Customer as a dict for the API, with the meta_data keys merged in."""
         data = {
             "id": str(self.id),
             "tenant_name": self.tenant_name,
@@ -77,10 +82,12 @@ class CustomerDocument(Document):
         return super(CustomerDocument, self).save(*args, **kwargs)
 
     def get_meta_data_field(self, field_name: str, default=None) -> Any:
+        """Read one key of meta_data, with a default."""
         return self.meta_data.get(field_name, default)
 
 
 class Meeting(BaseModel):
+    """Pydantic view of MeetingDocument."""
     meeting_id: str
     meeting_url: str
     start_time: str
@@ -89,6 +96,7 @@ class Meeting(BaseModel):
 
 
 class Customer(BaseModel):
+    """Pydantic view of a customer returned by the API (extra keys allowed)."""
     phone_number: Optional[str] = None
     name: Optional[str] = None
     platform: str = "waha"
@@ -103,6 +111,7 @@ class Customer(BaseModel):
     meetings: Optional[list[Meeting]] = []
 
     class Config:
+        """Pydantic configuration: keep unknown keys."""
         extra = "allow"
 
 
@@ -113,8 +122,9 @@ def fetch_or_create_customer(
     profile_name: str = "",
     platform: Optional[str] = None,
 ) -> CustomerDocument:
-    # from v1.common.background_task.record_all_bg_task_in_scheduler import delete_reminder
-
+    """Find the customer by phone number or email within the tenant, or create it; an empty name is filled with
+    profile_name.
+    """
     customer = CustomerDocument.objects(phone_number=number_phone, tenant_name=tenant_name).first()
     if not customer:
         customer = CustomerDocument.objects(email=number_phone, tenant_name=tenant_name).first()
@@ -130,10 +140,5 @@ def fetch_or_create_customer(
         customer.reload()
     if not customer.name or customer.name == "":
         customer.name = profile_name
-    if "reminder_time" in customer.meta_data:
-        customer.meta_data["reminder_time"] = ""
-        # delete_reminder(customer)
     customer.save()
-    # customer.reload()
-
     return customer

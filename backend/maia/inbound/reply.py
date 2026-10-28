@@ -31,6 +31,13 @@ async def reply_to_message(
     single_message_mode: bool = False,
     conversation_id: str = None,
 ) -> str:
+    """Generate and send the bot's reply for a saved message (the heart of the pipeline).
+
+    Order: cooldown guard (in a burst only the last task answers), customer + MessageContext,
+    tenant hook (tools), RAG generation, then the send phase inside ``except ReplyReady``:
+    guards, split on ``---`` and by length, send through the platform service, save the AI
+    message. Returns a short status text, or the JSON {message, tool_call} for the web channel.
+    """
     tenant = TenantDocument.objects(name=tenant_name).first()
 
     # single_message_mode: True when a specific message_id is passed (web page-by-page).
@@ -135,18 +142,6 @@ async def reply_to_message(
             else:
                 logger.warning("⚠️ Failed to convert %s", last_user_message.msg_type)
         message_str = last_user_message.message
-        document_ids = None
-        if last_user_message.meta_data.get("is_group_message", False):
-            org_sender_name = last_user_message.meta_data.get("original_sender_name", "")
-            org_sender_number = last_user_message.meta_data.get("original_sender_number", "")
-            include_phone = customer.get_meta_data_field("include_sender_phone_in_message", False)
-            if include_phone and org_sender_number:
-                message_str = f"{org_sender_name} ({org_sender_number}): {last_user_message.message}"
-            else:
-                message_str = f"{org_sender_name}: {last_user_message.message}"
-            document_ids = customer.get_meta_data_field("group_document_ids", None)
-            if not document_ids:
-                document_ids = None
         qa_metadata_filter = customer.get_meta_data_field("qa_metadata_filter", None)
         rag_categories = customer.get_meta_data_field("rag_categories", None)
 
@@ -154,7 +149,6 @@ async def reply_to_message(
             tenant_name=args["tenant_name"],
             message=message_str,
             session_id=session_id,
-            document_ids=document_ids,
             agent_config=agent_config,
             decorated_function_tools=args["tool_names"],
             request=args,
@@ -214,14 +208,12 @@ async def reply_to_message(
                 )
                 if should_reply:
                     for message_truncate in messages_truncate:
-                        _force_group_text = args["customer"].get_meta_data_field("force_send_to_group", False)
                         res = sender_service.send_whatsapp_message(
                             phone_number=args["sender_id"],
                             message=message_truncate,
                             thread_id=args["meta_data"].get("thread_id"),
                             message_id=args["meta_data"].get("email_message_id", args["message_id"]),
                             subject=args["meta_data"].get("subject", ""),
-                            force_send_to_group=_force_group_text,
                         )
 
                         # Persist thread_id returned by the send service into
@@ -385,8 +377,7 @@ def build_message_context(
         additional_context="",
         meta_data={
             "request_message": message,
-            "is_group": customer.meta_data.get("is_group", False),
-            "thread_id": message.meta_data.get("thread_id") or message.meta_data.get("threadId"),
+            "thread_id": message.meta_data.get("thread_id"),
             "email_message_id": message.meta_data.get("email_message_id"),
             "subject": message.meta_data.get("subject"),
         },
@@ -397,8 +388,7 @@ def build_message_context(
 
 
 def log_user_response_details(message: MessageDocument, label="💬 MESSAGE CONTENT:"):
-    if message.meta_data.get("is_group_message", True):
-        return
+    """Log the message's tenant, platform, sender and text (readable debug block)."""
     logger.info(f"Tenant Name:     {message.tenant_name}")
     logger.info(f"Platform:       {message.platform}")
     logger.info(f"Profile Name:   {message.profile_name}")
@@ -414,6 +404,9 @@ def log_user_response_details(message: MessageDocument, label="💬 MESSAGE CONT
 
 
 def get_conversation_messages(tenant_name, user_id, conversation_id=None):
+    """The newest 500 messages of the customer's online conversation, oldest first, without the ones flagged
+    exclude_from_conversation.
+    """
     if conversation_id:
         conv = Conversation.objects(id=conversation_id).first()
         if not conv:
@@ -435,12 +428,9 @@ def has_new_user_message_before_response(
     last_user_message: MessageDocument, chat_settings: ChatSettingsDocument
 ) -> bool:
     """Check if there is a new user message after the last_user_message
-    In the group conversation, we do not check the new messages
     Args:
         last_user_message (MessageDocument): The last user message to compare against
     """
-    if last_user_message.meta_data.get("is_group", False):
-        return False
     if last_user_message.platform == "web" or (
         chat_settings.chatbot_human_like_time
         and (chat_settings.chatbot_human_like_delay or 0) == 0

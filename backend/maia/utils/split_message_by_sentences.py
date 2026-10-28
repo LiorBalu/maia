@@ -29,12 +29,15 @@ def _split_oversized_chunk(text, max_length):
 
 
 def split_message_by_sentences(message, max_length):
+    """Split a text into parts of at most max_length characters at sentence boundaries (. ! ?), cutting oversized
+    sentences at natural breaks.
+    """
     sentences = re.split(r"(?<=[.!?])\s", message)
     parts = []
     current_part = ""
 
     for sentence in sentences:
-        if len(current_part) + len(sentence) + 1 <= max_length:  # +1 pour l'espace
+        if len(current_part) + len(sentence) + 1 <= max_length:  # +1 for the space
             current_part += sentence + " "
         else:
             if current_part.strip():

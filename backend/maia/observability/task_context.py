@@ -28,6 +28,7 @@ def contextual_task(func):
     @wraps(func)
     async def async_wrapper(*args, **kwargs):
         # Reset context at the start
+        """Async variant: set the context from the bound arguments, run the task, always reset."""
         reset_context()
 
         try:
@@ -56,6 +57,7 @@ def contextual_task(func):
     @wraps(func)
     def sync_wrapper(*args, **kwargs):
         # Reset context at the start
+        """Sync variant: set the context from the bound arguments, run the task, always reset."""
         reset_context()
 
         try:

@@ -17,7 +17,6 @@ def filter_conversations(
     conversation_status: Optional[str] = None,
     read_by_manager: Optional[bool] = None,
     last_message_date: Optional[str] = None,
-    tags: Optional[list[str]] = None,
     assigned_to: Optional[str] = None,
     resolution_status: Optional[str] = None,
     agent_required: Optional[bool] = None,
@@ -35,8 +34,8 @@ def filter_conversations(
     query_filters = Q(tenant_name=tenant_name)
 
     if platform == "whatsapp":
-        # The inbox's "WhatsApp" filter matches WAHA conversations ("whatsapp" is accepted as an alias).
-        query_filters &= Q(platform__in=["waha", "whatsapp"])
+        # The inbox's "WhatsApp" filter is the WAHA channel ("whatsapp" is the UI's name for it).
+        query_filters &= Q(platform="waha")
     elif platform:
         query_filters &= Q(platform=platform)
 
@@ -78,8 +77,6 @@ def filter_conversations(
         query_filters &= Q(
             last_message_date__gte=start_of_day, last_message_date__lte=end_of_day
         )
-    if tags:
-        query_filters &= Q(tags__name__in=tags)
     if assigned_to:
         if assigned_to == "unassigned":
             query_filters &= Q(assigned_to__exists=False) | Q(assigned_to="")
@@ -93,6 +90,7 @@ def filter_conversations(
 
 
 def parse_last_message_date(last_message_date) -> Optional[datetime]:
+    """Parse a date string in one of the accepted formats (YYYY-MM-DD or ISO variants); None when invalid."""
     if not last_message_date:
         return None
     try:
@@ -119,6 +117,7 @@ def parse_last_message_date(last_message_date) -> Optional[datetime]:
 
 
 def parse_date(date_str):
+    """Parse a date string in one of the accepted formats (YYYY-MM-DD or ISO variants); None when invalid."""
     if not date_str:
         return None
     try:

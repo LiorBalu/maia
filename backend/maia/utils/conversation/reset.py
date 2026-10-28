@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 def _get_reset_conversation(tenant_name: str, phone_number: str, conversation_id: str = None, platform: str = None):
+    """The conversation to close: by id, or the online one of the number (scoped to the platform when given)."""
     if conversation_id:
         return Conversation.objects(id=conversation_id).first()
     # Platforms are always kept in separate conversations: `platform` narrows the lookup, so a
@@ -24,6 +25,7 @@ def _get_reset_conversation(tenant_name: str, phone_number: str, conversation_id
 
 
 async def _finish_conversation_reset(tenant_name: str, phone_number: str, conversation_doc) -> None:
+    """Attach the call recording (phone) and close the conversation."""
     if not conversation_doc:
         return
 
@@ -32,6 +34,7 @@ async def _finish_conversation_reset(tenant_name: str, phone_number: str, conver
 
 
 def _reset_customer_conversation_flags(tenant_name: str, phone_number: str) -> None:
+    """Clear the customer's agent_requested flag."""
     customer = CustomerDocument.objects(tenant_name=tenant_name, phone_number=phone_number).first()
     if not customer:
         return
@@ -41,6 +44,7 @@ def _reset_customer_conversation_flags(tenant_name: str, phone_number: str) -> N
 
 
 async def reset_conversation(tenant_name: str, phone_number: str, conversation_id: str = None, platform: str = None):
+    """End a conversation: close it (with the call record for phone calls) and clear the customer's agent flag."""
     conversation_doc = _get_reset_conversation(tenant_name, phone_number, conversation_id, platform)
     await _finish_conversation_reset(tenant_name, phone_number, conversation_doc)
     _reset_customer_conversation_flags(tenant_name, phone_number)
@@ -48,6 +52,9 @@ async def reset_conversation(tenant_name: str, phone_number: str, conversation_i
 
 
 def update_conversation_with_call_record(tenant_name, conversation_doc):
+    """For a finished phone conversation, fetch the Twilio recording of its call_sid once, store the audio in the
+    bucket and write {duration, status, media_url} into meta_data.call_record.
+    """
     try:
         if (
             conversation_doc.platform == "telephone"

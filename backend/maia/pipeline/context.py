@@ -56,10 +56,12 @@ class MessageContext(TypedDict):
     - ``message_text``, ``message_id`` (the platform's id: WAHA message id, Gmail id, uuid for calls).
     - ``message_type`` (text / image / audio...), ``media_url``, ``media_content_type``.
 
-    Prompt building (read by the RAG and by the Realtime session):
+    Prompt building (read by the Realtime session only; the chat RAG uses ``default`` + ``platform_<platform>``):
     - ``extra_prompt_name``: name of an extra ``PromptDocument`` appended to the instructions.
     - ``additional_context``: free text appended to the instructions.
-    - ``meta_data``: per-message flags (``request_message``, ``is_group``, ``thread_id``,
+
+    Per-message state:
+    - ``meta_data``: per-message flags (``request_message``, ``thread_id``,
       ``subject``, ``call_sid``, ``should_reply_after_process``...).
 
     Tools (filled by the business handler, consumed by the tool adapters):

@@ -39,6 +39,50 @@ except Exception:
     redis_client = None
 
 
+# What OpenAI's /v1/chat/completions accepts from each model family (checked live against the
+# catalog on 2026-10-28):
+#   - gpt-4.1 / gpt-4o: temperature works, there is no reasoning parameter.
+#   - gpt-5.x / gpt-6.x: any temperature other than the default is rejected (langchain-openai drops
+#     it only for "gpt-5*", so we never send it ourselves for these families).
+#   - gpt-5.6-* and gpt-6-* / gpt-6.1-*: function tools work only with reasoning_effort="none"
+#     (fastest answers, no hidden reasoning).
+#   - gpt-6-astra and gpt-6.1-sol accept neither "none" nor function tools on chat completions,
+#     so they go through the Responses API with the lowest effort they offer.
+OPENAI_RESPONSES_ONLY_MODELS = ("gpt-6-astra", "gpt-6.1-sol")
+OPENAI_NO_REASONING_PREFIXES = ("gpt-5.6", "gpt-6")
+OPENAI_REASONING_PREFIXES = ("gpt-5", "gpt-6", "o1", "o3", "o4")
+
+
+def openai_model_kwargs(model_name: str, temperature: float) -> Dict[str, Any]:
+    """Extra ChatOpenAI arguments for an OpenAI model: temperature only for the gpt-4 generation,
+    reasoning_effort="none" for gpt-5.6 / gpt-6 on chat completions, and the Responses API with
+    effort "low" for the two models that offer neither (see the table above).
+    """
+    name = str(model_name)
+    if name.startswith(OPENAI_RESPONSES_ONLY_MODELS):
+        return {"use_responses_api": True, "reasoning": {"effort": "low"}}
+    if name.startswith(OPENAI_NO_REASONING_PREFIXES):
+        return {"reasoning_effort": "none"}
+    if name.startswith(OPENAI_REASONING_PREFIXES):
+        return {}
+    return {"temperature": temperature}
+
+
+def message_text(content: Any) -> str:
+    """The text of a model answer: a plain string, or the joined text blocks the Responses API returns."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict) and part.get("type") in ("text", "output_text"):
+                parts.append(part.get("text", ""))
+        return "".join(parts)
+    return "" if content is None else str(content)
+
+
 class TokenUsageCallbackHandler(BaseCallbackHandler):
     """
     Callback handler to track token usage from LLM calls.
@@ -46,6 +90,7 @@ class TokenUsageCallbackHandler(BaseCallbackHandler):
     """
 
     def __init__(self):
+        """Start every token counter at zero."""
         super().__init__()
         self.prompt_tokens = 0
         self.completion_tokens = 0
@@ -102,7 +147,6 @@ class ConversationalRAG:
     def __init__(
         self,
         tenant_name: str,
-        document_ids: Optional[List[str]] = None,
         agent_config: Optional[dict] = None,
         include_qa: bool = True,
         include_documents: bool = True,
@@ -112,8 +156,10 @@ class ConversationalRAG:
         decorated_function_tools: Optional[List[str]] = None,
         request: Optional[MessageContext] = None,
     ):
+        """Build the chain for one message: the LLM of the tenant's agent (OpenAI / Anthropic / Google), the bound
+        tools, the document + Q&A retriever and the history-aware conversation chain.
+        """
         self.tenant_name = tenant_name
-        self.document_ids = document_ids
         self.agent_config = agent_config or {}
         self.include_qa = include_qa
         self.include_documents = include_documents
@@ -148,15 +194,10 @@ class ConversationalRAG:
             if not self.openai_api_key:
                 raise ValueError(f"No OpenAI API key found for tenant {tenant_name}")
             model_name = self.agent_config.get("model", "gpt-4.1")
-            # gpt-5.6 rejects function tools alongside its default reasoning on
-            # /v1/chat/completions; reasoning_effort="none" unblocks tool calls.
-            # Empty for every other model, so their config is unchanged.
-            reasoning_kwargs = {"reasoning_effort": "none"} if str(model_name).startswith("gpt-5.6") else {}
             self.llm = ChatOpenAI(
                 openai_api_key=self.openai_api_key,
                 model=model_name,
-                temperature=self.agent_config.get("temperature", 0),
-                **reasoning_kwargs,
+                **openai_model_kwargs(model_name, self.agent_config.get("temperature", 0)),
             )
         elif provider == "anthropic":
             key = resolve_anthropic_api_key(tenant)
@@ -369,6 +410,7 @@ class ConversationalRAG:
         all_retrievers = []
 
         def _safe_int(value: Any, default: int) -> int:
+            """int(value), or the default for None / empty / invalid values."""
             try:
                 if value is None:
                     return default
@@ -383,6 +425,7 @@ class ConversationalRAG:
 
         # Extract score_threshold from agent config (default 0 = no filtering)
         def _safe_float(value: Any, default: float) -> float:
+            """float(value), or the default for None / empty / invalid values."""
             try:
                 if value is None:
                     return default
@@ -398,7 +441,6 @@ class ConversationalRAG:
         if self.include_documents:
             doc_retriever = MultiDocumentRetriever(
                 tenant_name=self.tenant_name,
-                document_ids=self.document_ids,
                 top_k=documents_top_k,
                 categories=self.document_categories,
             )
@@ -533,8 +575,11 @@ class ConversationalRAG:
             agent_executor = AgentExecutor(agent=agent, tools=self.tools, verbose=True)
 
             # Wrapper to bridge RAG Retrival Output -> Agent Input
-            async def run_agent_entry_point(input_dict):  # 👈 Ajouter async
+            async def run_agent_entry_point(input_dict):
                 # Retrieve the documents found by the previous step
+                """Bridge between the retrieval step and the tool-calling agent: format the retrieved documents as the
+                {context} of the prompt and run the agent executor.
+                """
                 context_docs = input_dict.get("context", [])
 
                 # Format docs to string
@@ -557,7 +602,7 @@ class ConversationalRAG:
                         "current_date": formatted_date,
                     }
                 )
-                return result["output"]
+                return message_text(result["output"])
 
             # This replaces create_stuff_documents_chain
             question_answer_chain = RunnableLambda(run_agent_entry_point)
@@ -598,6 +643,9 @@ class ConversationalRAG:
         return text.replace("{", "{{").replace("}", "}}")
 
     def generate_qa_prompt(self):
+        """Assemble the system prompt: date and time of day, the tenant's default prompt, the platform prompt
+        (``platform_<platform>``, when one exists) and the {context} slot; braces in DB content are escaped.
+        """
         prompt_doc = PromptDocument.objects(tenant_name=self.tenant_name, name="default").first()
         if not prompt_doc:
             prompt_doc = PromptDocument(tenant_name=self.tenant_name, name="default", content="")
@@ -609,18 +657,6 @@ class ConversationalRAG:
         formatted_date = now.strftime("%a, %d %b %Y, %H:%M")
         additional_instructions = ""
         if self.request:
-            if self.request["extra_prompt_name"]:
-                custom_prompt_doc = PromptDocument.objects(
-                    tenant_name=self.tenant_name, name=self.request["extra_prompt_name"]
-                ).first()
-                if custom_prompt_doc:
-                    additional_instructions += f"\n\n{custom_prompt_doc.prompt}"
-            if self.request["customer"].meta_data.get("custom_prompt"):
-                custom_prompt_doc = PromptDocument.objects(
-                    tenant_name=self.tenant_name, name=self.request["customer"].meta_data["custom_prompt"]
-                ).first()
-                if custom_prompt_doc:
-                    additional_instructions += f"\n\n{custom_prompt_doc.prompt}"
             # fetch additional prompt for specific platform
             platform_prompt_document = PromptDocument.objects(
                 tenant_name=self.tenant_name, name=f"platform_{self.request['platform']}"
@@ -628,17 +664,7 @@ class ConversationalRAG:
             if platform_prompt_document:
                 additional_instructions += f"\n\n{platform_prompt_document.prompt}"
 
-            utils_prompt_document = PromptDocument.objects(tenant_name=self.tenant_name, name="utils").first()
-            if utils_prompt_document:
-                additional_instructions += f"\n\n{utils_prompt_document.prompt}"
-
-            if self.request["additional_context"]:
-                additional_instructions += f"\n\n{self.request['additional_context']}"
-
-            if self.request["customer"].meta_data.get("additional_context"):
-                additional_instructions += f"\n\n{self.request['customer'].meta_data['additional_context']}"
-
-        # Escape curly braces in ALL dynamic content from DB / customer data so that
+        # Escape curly braces in ALL dynamic content from the DB so that
         # LangChain's ChatPromptTemplate does not treat JSON like {"name": "..."} as
         # missing template variables (which causes a KeyError crash → silent fallback
         # to plain GPT with no RAG and no tools).
@@ -813,7 +839,6 @@ async def chat_with_documents(
     tenant_name: str,
     message: str,
     session_id: str,
-    document_ids: Optional[List[str]] = None,
     agent_config: Optional[dict] = None,
     include_qa: bool = True,
     include_documents: bool = True,
@@ -832,7 +857,6 @@ async def chat_with_documents(
         tenant_name: Name of the tenant
         message: User's message/question
         session_id: Unique session identifier for conversation
-        document_ids: List of specific document IDs
         agent_config: Optional agent configuration
         include_qa: Whether to include Q&A in search
         include_documents: Whether to include documents in search
@@ -851,7 +875,6 @@ async def chat_with_documents(
     try:
         rag = ConversationalRAG(
             tenant_name,
-            document_ids,
             agent_config=agent_config,
             include_qa=include_qa,
             include_documents=include_documents,

@@ -14,7 +14,9 @@ logger = logging.getLogger(__name__)
 
 
 class TwilioSmsService:
+    """Twilio REST client of a tenant's Voice account (used for the call recordings)."""
     def __init__(self, tenant_name: str, tenant: TenantDocument, sender_number: Optional[str] = None):
+        """Pick the Twilio account by sender number (or the first one) and open the client."""
         twilio_data = (sender_number and tenant.get_twilio_by_phone_number(sender_number)) or tenant.twilio_accounts[0]
         self.twilio_account_sid = twilio_data.account_sid
         self.twilio_auth_token = twilio_data.auth_token

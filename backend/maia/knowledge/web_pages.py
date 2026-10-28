@@ -40,6 +40,9 @@ def scrape_url_and_embed(
         # ── helpers ──────────────────────────────────────────────
 
         def bs4_extractor(html: str) -> str:
+            """HTML to text for RecursiveUrlLoader: skip CSS / JS blobs, strip scripts, styles, navigation and cookie
+            banners, keep the main content, dedupe lines and append the image links.
+            """
             html_sample = html[:2000].lower()
             if any(
                 indicator in html_sample
@@ -141,8 +144,6 @@ def scrape_url_and_embed(
                 line = line.strip()
                 if len(line) < 3 or line in seen_lines:
                     continue
-                if line in ["דף הבית", "צור קשר", "עגלת קניות", "0.00", "₪", "0"]:
-                    continue
                 seen_lines.add(line)
                 clean_lines.append(line)
             text_content = "\n".join(clean_lines)
@@ -153,6 +154,9 @@ def scrape_url_and_embed(
             return text_content
 
         def sitemap_parser(content: BeautifulSoup) -> str:
+            """BeautifulSoup page to text for SitemapLoader: empty for CSS / JS pages, otherwise the page text without
+            navigation and junk.
+            """
             raw_text = str(content)
             css_indicators = [
                 "@font-face",
@@ -221,6 +225,9 @@ def scrape_url_and_embed(
             return text
 
         def is_css_or_js_garbage(text: str, source_url: str = "") -> bool:
+            """True when a scraped page is really a stylesheet or a script (by URL, by CSS markers or by brace
+            density).
+            """
             if not text or len(text.strip()) < 50:
                 return True
             url_lower = source_url.lower()

@@ -8,6 +8,7 @@ TRANSCRIPTION_MODEL = "gpt-4o-transcribe"
 
 
 def transcribe_audio_file(file_path: str, tenant_name: str) -> str:
+    """Transcribe an audio file with OpenAI (gpt-4o-transcribe), with the tenant's language as a hint."""
     from maia.services.registry import chatbot_for
     from maia.models.tenants import TenantDocument
 

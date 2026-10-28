@@ -1,3 +1,7 @@
+"""FastAPI entry point of Maia: logging, CORS, the routers of every channel and of the management API, startup
+discovery of tools, and the request-logging middleware.
+"""
+
 import asyncio
 import logging
 import os
@@ -6,8 +10,7 @@ import time
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 from starlette.responses import Response as StarletteResponse
 
 logger = logging.getLogger(__name__)
@@ -42,8 +45,10 @@ httpx_logger.setLevel(logging.WARNING)
 
 # Filter out SSL protocol errors from asyncio (these occur during normal SSE client disconnections)
 class SSLErrorFilter(logging.Filter):
+    """Logging filter that drops the SSL noise asyncio logs when an SSE client disconnects."""
     def filter(self, record):
         # Filter out SSL protocol errors that occur when clients disconnect
+        """Return False (drop) for the two SSL disconnect messages, True for everything else."""
         if "Fatal error on SSL protocol" in record.getMessage():
             return False
         if "protocol.data_received() failed" in record.getMessage():
@@ -65,6 +70,7 @@ app = FastAPI(
 
 # Signal handler for graceful shutdown
 def signal_handler(sig, frame):
+    """SIGINT / SIGTERM handler: cancel the pending asyncio tasks and exit the process."""
     logger.info(f"\nSignal {sig}  received. Forced shutdown in progress...")
     try:
         # Force cleanup of asyncio tasks
@@ -92,11 +98,6 @@ signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
 signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
 
 
-@app.get("/favicon.ico", include_in_schema=False)
-async def favicon():
-    return FileResponse("static/favicon.ico")
-
-
 origins = [os.environ.get("FRONTEND_URL", "http://localhost:5173"), "http://127.0.0.1:5173", "*"]
 
 app.add_middleware(
@@ -112,7 +113,6 @@ app.include_router(media_stream_router, prefix="/api", tags=["Call Stream"])
 app.include_router(management_router, prefix="/management/v1")
 app.include_router(sse_router, prefix="/management/v1", tags=["SSE"])
 app.include_router(docs_router, prefix="")
-app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +120,8 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # per-user inside security_docs.py where the request user is available).
 # ---------------------------------------------------------------------------
 def _custom_openapi():
+    """Build the base OpenAPI schema of the app (the tenant enum is injected per request in maia/api/openapi_docs.py).
+    """
     from fastapi.openapi.utils import get_openapi
 
     return get_openapi(title=app.title, version=app.version, description=app.description, routes=app.routes)
@@ -130,6 +132,7 @@ app.openapi = _custom_openapi
 
 @app.get("/")
 async def root():
+    """Liveness message at the root URL."""
     return {"message": "The Maia API is running"}
 
 
@@ -141,6 +144,9 @@ async def health_check():
 
 @app.on_event("startup")
 async def startup_event():
+    """Startup: register the @gpt_tool functions, mount the tenants' custom routers and connect the SSE manager to
+    Redis.
+    """
     logger.info("Starting up application...")
 
     # Discover and register all decorated tools
@@ -151,15 +157,6 @@ async def startup_event():
         logger.info("Tools auto-discovery completed successfully")
     except Exception as e:
         logger.error(f"Error during tools auto-discovery: {e}")
-
-    # Auto-discover and register tenant routes
-    try:
-        from tenants.route_discovery import discover_tenant_routes
-
-        discover_tenant_routes(app)
-        logger.info("Tenant routes auto-discovery completed successfully")
-    except Exception as e:
-        logger.error(f"Error during tenant routes auto-discovery: {e}")
 
     # Initialize Redis SSE Manager
     # This will start the background cleanup task for SSE connections
@@ -174,6 +171,7 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    """Shutdown: stop the SSE manager and close its connections."""
     logger.info("Shutting down application...")
 
     # Stop Redis SSE Manager and cleanup
@@ -196,7 +194,7 @@ async def shutdown_event():
     logger.info("Application shutdown complete")
 
 
-# Paths to skip for error logging (noisy health-check probes)
+# Paths to skip for error logging (health-check probes; browsers ask for a favicon the backend does not serve)
 _SKIP_ERROR_REPORT_PATHS = frozenset({"/health", "/favicon.ico"})
 
 # Max body bytes to log
@@ -215,6 +213,9 @@ def _safe_decode(data: bytes, max_len: int = _MAX_BODY_LOG) -> str:
 
 @app.middleware("http")
 async def log_request_time(request: Request, call_next):
+    """HTTP middleware: time every request and log one metrics line; mongoengine validation errors become a 400 JSON,
+    and the bodies of error responses (4xx / 5xx and the 27x webhook codes) are logged.
+    """
     start_time = time.time()
 
     # Cache request body so we can log it on error responses

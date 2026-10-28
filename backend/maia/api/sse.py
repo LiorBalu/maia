@@ -22,7 +22,9 @@ sse_router = APIRouter(prefix="/sse", tags=["Server-Sent Events"])
 
 # Custom JSON encoder for datetime objects
 class DateTimeEncoder(json.JSONEncoder):
+    """JSON encoder for SSE payloads: datetimes as ISO strings, other objects through their dict or str."""
     def default(self, obj):
+        """Serialize a value json cannot handle (datetime, objects, iterables)."""
         if isinstance(obj, datetime):
             return obj.isoformat()
         # Handle other non-serializable objects
@@ -37,7 +39,11 @@ class DateTimeEncoder(json.JSONEncoder):
 
 
 class SSEConnection:
+    """One browser subscription: an asyncio queue the generator drains, the filters of the inbox view, and the Redis
+    registration.
+    """
     def __init__(self, tenant_name: str, user_id: str, filters: dict = None):
+        """Create the queue and a unique connection id (tenant:user:timestamp)."""
         self.tenant_name = tenant_name
         self.user_id = user_id
         self.filters = filters or {}
@@ -101,6 +107,7 @@ class SSEConnection:
             logger.error(f"Error updating heartbeat for connection {self.connection_id}: {e}")
 
     async def send_data(self, data: dict):
+        """Queue a payload for the client and refresh the heartbeat; a failure deactivates the connection."""
         if self.active:
             try:
                 await self.queue.put(data)
@@ -110,11 +117,14 @@ class SSEConnection:
                 self.active = False
 
     async def generator(self):
+        """Async generator of the SSE stream: yields the queued payloads as data: lines, and a heartbeat after 25 s of
+        silence (reverse proxies drop idle streams, typically after about 100 s).
+        """
         try:
             while self.active:
                 try:
                     # Wait for data with timeout to send heartbeat
-                    # Cloudflare closes SSE connections after ~100s of inactivity (524 error),
+                    # Reverse proxies drop idle SSE connections (typically after ~100 s),
                     # so we send a heartbeat every 25s to stay well within that limit.
                     data = await asyncio.wait_for(self.queue.get(), timeout=25.0)
                     if self.active and data:  # Check again after getting data and validate data
@@ -215,7 +225,6 @@ async def conversations_sse(
     read_by_manager: bool = Query(None, description="Filter by read status"),
     resolution_status: str = Query(None, description="Filter by resolution status"),
     agent_required: bool = Query(None, description="Filter by agent required"),
-    tags: str = Query(None, description="Filter by tags (comma-separated)"),
     phone_number: str = Query(None, description="Filter by phone number"),
     query: str = Query(None, description="Search query for filtering"),
     include_tools_call: bool = Query(False, description="Include tools_call messages or only user/assistant/manager"),
@@ -254,8 +263,6 @@ async def conversations_sse(
         connection_filters["resolution_status"] = resolution_status
     if agent_required is not None:
         connection_filters["agent_required"] = agent_required
-    if tags:
-        connection_filters["tags"] = tags
     if phone_number:
         connection_filters["phone_number"] = phone_number
     if query:
@@ -302,6 +309,9 @@ async def conversations_sse(
 
     # Handle client disconnect
     async def check_disconnect():
+        """Poll the request every 5 s; when the client is gone, deactivate the connection and unregister it from
+        Redis.
+        """
         try:
             while connection.active:
                 if await request.is_disconnected():
@@ -569,29 +579,6 @@ def _conversation_matches_filters(conversation_dict: dict, filters: dict) -> boo
                 # print(
                 #     f"Conversation {conv_id} filtered out by agent_required: "
                 #     f"{conv_agent_req} != {filters['agent_required']}"
-                # )
-                return False
-
-        # Tags filter
-        if filters.get("tags"):
-            filter_tags = [tag.strip() for tag in filters["tags"].split(",") if tag.strip()]
-            conversation_tags = conversation_dict.get("tags", [])
-
-            # Normalize conversation tags to array of strings
-            conversation_tag_names = []
-            if isinstance(conversation_tags, list):
-                for tag in conversation_tags:
-                    if isinstance(tag, dict) and "name" in tag:
-                        conversation_tag_names.append(tag["name"])
-                    elif isinstance(tag, str):
-                        conversation_tag_names.append(tag)
-
-            # Check if any filter tag matches conversation tags
-            has_matching_tag = any(tag in conversation_tag_names for tag in filter_tags)
-            if not has_matching_tag:
-                # print(
-                #     f"Conversation {conv_id} filtered out by tags: "
-                #     f"{conversation_tag_names} doesn't match {filter_tags}"
                 # )
                 return False
 

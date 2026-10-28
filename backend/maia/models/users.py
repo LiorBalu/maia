@@ -1,4 +1,4 @@
-"""Dashboard users: roles (staff / partner / member), tenant access and password history."""
+"""Dashboard users: roles (staff / user), tenant access and password history."""
 
 from typing import Dict, List, Optional
 
@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 
 class User(Model):
+    """odmantic view of a dashboard user (used by the Basic Auth of the docs)."""
     email: str = Field(unique=True)
     password: str
     is_staff: bool = False
@@ -28,29 +29,26 @@ class User(Model):
 
     model_config = {"collection": "users"}
 
-    @property
-    def is_partner(self) -> bool:
-        return self.role == "partner"
-
 
 # Password history
 class PasswordHistoryEntry(EmbeddedDocument):
+    """A previous password hash (reuse check)."""
     hash = StringField(required=True)
 
 
 ROLE_STAFF = "staff"
-ROLE_PARTNER = "partner"
 ROLE_USER = "user"
-USER_ROLES = (ROLE_STAFF, ROLE_PARTNER, ROLE_USER)
+USER_ROLES = (ROLE_STAFF, ROLE_USER)
 
 
 class UserDocument(Document):
+    """A dashboard user: email, password hash, role (staff / user), tenant permissions and password history.
+    """
     name = StringField(required=False, default="name")
     email = EmailField(required=True, unique=True)
     password = StringField(required=True)
     is_staff = BooleanField(default=False)
-    # "staff" = internal operator (full access), "partner" = reseller who creates and
-    # administers his own tenants without being a member of them, "user" = tenant member.
+    # "staff" = internal operator (full access), "user" = tenant member.
     # `is_staff` mirrors `role == "staff"` so JWT consumers and permission checks can test one boolean.
     role = StringField(choices=USER_ROLES, default=ROLE_USER)
     tenants_name = ListField(StringField())
@@ -66,15 +64,12 @@ class UserDocument(Document):
     meta = {"collection": "users"}
 
     def __init__(self, *args, **kwargs):
+        """Default the permissions to full access on tenants_name, and promote is_staff=True to the staff role."""
         super().__init__(*args, **kwargs)
         if not self.permissions:
             self.permissions = {tenant_name: ["grant_access", "min_access"] for tenant_name in self.tenants_name}
         if kwargs.get("role") is None and kwargs.get("is_staff"):
             self.role = ROLE_STAFF
-
-    @property
-    def is_partner(self) -> bool:
-        return self.role == ROLE_PARTNER
 
     def clean(self):
         """Keep `role` and the `is_staff` flag consistent.
@@ -97,6 +92,7 @@ class UserDocument(Document):
 
 
 class UserRequest(BaseModel):
+    """Body of user registration."""
     name: Optional[str] = None
     email: Optional[str] = None
     password: Optional[str] = None
@@ -108,14 +104,15 @@ class UserRequest(BaseModel):
     tenants_name: Optional[List[str]] = []
 
     class Config:
+        """Example payload shown in the API docs."""
         json_schema_extra = {
             "example": {
-                "email": "z083214808@gmail.com",
+                "email": "sun@maia.local",
                 "password": "123456",
                 "name": "name",
-                "phone_number": "972545564449",
+                "phone_number": "972500000000",
                 "is_staff": False,
                 "permissions": {},
-                "tenants_name": ["yayo_dev_testing"],
+                "tenants_name": ["sun-cosmetics"],
             }
         }

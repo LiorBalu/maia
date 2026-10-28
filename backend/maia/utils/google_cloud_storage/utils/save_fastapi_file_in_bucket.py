@@ -22,6 +22,9 @@ def sanitize_filename(name: str) -> str:
 
 async def save_fastapi_file_in_bucket(tenant_name: str, file: UploadFile, filename: Optional[str] = None) -> tuple:
     # Initialize message_type with a default value
+    """Upload a FastAPI file to the bucket under the tenant's folder; returns (message_type, public URL). The type
+    (image / docx / xlsx / csv / pdf / audio / txt...) comes from the content type.
+    """
     message_type = "document"
 
     if file.content_type in ["image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp", "image/tiff"]:

@@ -43,6 +43,7 @@ GCP_PROJECT_ID = getenv("GCP_PROJECT_ID", "")
 
 def get_email_service(access_token: str, refresh_token: str, scopes: list = None):
     # Use provided scopes or default Gmail scopes
+    """Gmail API client for the stored OAuth tokens (default scopes: read, send, modify)."""
     if scopes is None:
         scopes = [
             "https://www.googleapis.com/auth/gmail.readonly",
@@ -118,13 +119,6 @@ def get_message_content(service, message_id: str) -> dict:
 
         headers = payload["headers"]
 
-        # Check sender to see if it's Israel Post
-        sender = next(
-            (header["value"] for header in headers if header["name"] == "From"),
-            "Unknown Sender",
-        )
-
-
         attachments = get_attachments(service, message, message_id, user_id="me")
 
         subject = next(
@@ -157,6 +151,7 @@ def get_message_content(service, message_id: str) -> dict:
 
         # Function to recursively extract text from parts
         def extract_text_from_parts(parts, level=0):
+            """Walk the MIME parts recursively and return (plain_text, html); the plain part wins when both exist."""
             plain_text_content = ""
             html_content = ""
             indent = "  " * level
@@ -230,12 +225,6 @@ def get_message_content(service, message_id: str) -> dict:
         logger.info(f"Final body length: {len(body)}")
         if len(body) == 0:
             logger.warning("Warning: No body content extracted")
-            # For Israel Post emails, let's also try to extract from snippet if available
-            if "postil.co.il" in sender or "Israel Post" in sender:
-                snippet = message.get("snippet", "")
-                if snippet:
-                    logger.info(f"Using snippet as fallback: {snippet}")
-                    body = snippet
 
         return {
             "from": sender,
@@ -255,10 +244,12 @@ def get_message_content(service, message_id: str) -> dict:
 
 
 def get_attachments(service, message, message_id, user_id="me"):
+    """Download every attachment of a Gmail message; returns a list of {filename, mimeType, data} or None."""
     parts = message["payload"].get("parts", [])
     attachments = []
 
     def walk_parts(parts):
+        """Recurse into the MIME parts and collect the ones that carry a filename."""
         for part in parts:
             if part.get("filename"):
                 if "attachmentId" in part["body"]:
@@ -286,12 +277,14 @@ def get_attachments(service, message, message_id, user_id="me"):
 
 
 class RegisterEmail(BaseModel):
+    """Body of the Gmail watch registration: the account email."""
     email: str
 
     class Config:
+        """Example payload shown in the API docs."""
         json_schema_extra = {
             "example": {
-                "email": "z083214808@gmail.com",
+                "email": "sun.cosmetics.maia@gmail.com",
             }
         }
 
@@ -303,6 +296,10 @@ async def register_email(
     tenant_name: Optional[str] = None,
     user: User = Depends(verify_token_extended),
 ):
+    """Register Gmail push for a connected account: make sure the Pub/Sub topic and push subscription exist (pointing
+    at /api/async/email), give Gmail's service account publish rights, start the Gmail watch and store the
+    integration. Needs a public HTTPS BACKEND_URL.
+    """
     tenant_name = tenant_name or user.tenants_name[0]
     # The record of the account being registered (its own tokens are needed for the watch); fall
     # back to any record of the tenant for callers that only know the tenant.
@@ -430,6 +427,9 @@ def create_email_integration(
     history_id: str,
 ):
     # Check if this email is already linked to a DIFFERENT tenant
+    """Save or update the GoogleShared record of the Gmail integration (tokens, gmail_watch_enabled); an email already
+    linked to another tenant is refused.
+    """
     existing_by_email = GoogleShared.objects(email=email).first()
     if existing_by_email and existing_by_email.tenant_name != tenant_name:
         raise HTTPException(
@@ -583,6 +583,7 @@ async def unregister_email(
     tenant_name: Optional[str] = None,
     user: User = Depends(verify_token_extended),
 ):
+    """Stop the Gmail watch of an account and mark its integration as disabled."""
     tenant_name = tenant_name or user.tenants_name[0]
     calendar = GoogleShared.objects(tenant_name=tenant_name, email=register_email.email).first()
     if not calendar:

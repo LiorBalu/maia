@@ -1,8 +1,7 @@
 """Shared utilities for extracting and handling media URLs in bot responses.
 
-Used by WahaService and other platform
-services to detect media links (Google Drive, Dropbox, OneDrive, direct file
-URLs) in AI-generated text, convert sharing URLs to direct-download URLs,
+Used by WahaService and other platform services to detect media links (Google Drive,
+direct file URLs) in AI-generated text, convert sharing URLs to direct-download URLs,
 and clean the message text after extraction.
 """
 
@@ -73,8 +72,6 @@ MEDIA_CONTENT_TYPES = (
 # Patterns for cloud storage sharing URLs that need conversion
 _GDRIVE_FILE_RE = r"drive\.google\.com/file/d/([a-zA-Z0-9_-]+)"
 _GDRIVE_OPEN_RE = r"drive\.google\.com/open\?id=([a-zA-Z0-9_-]+)"
-_DROPBOX_RE = r"dropbox\.com/"
-_ONEDRIVE_RE = r"1drv\.ms/|onedrive\.live\.com/"
 
 
 # ---------------------------------------------------------------------------
@@ -119,10 +116,7 @@ def encode_url_path(url: str) -> str:
 def to_direct_download_url(url: str) -> str:
     """Convert cloud-storage sharing URLs to direct-download equivalents.
 
-    Supported services:
-    - Google Drive  (/file/d/ID/view  or  /open?id=ID)
-    - Dropbox       (?dl=0 → ?dl=1)
-    - OneDrive      (?download=1 appended)
+    Supported service: Google Drive (/file/d/ID/view  or  /open?id=ID).
 
     Returns the original URL unchanged if no conversion applies.
     """
@@ -134,31 +128,12 @@ def to_direct_download_url(url: str) -> str:
     if m:
         return f"https://drive.google.com/uc?export=download&id={m.group(1)}"
 
-    # --- Dropbox ---
-    if "dropbox.com/" in url:
-        if "dl=0" in url:
-            return url.replace("dl=0", "dl=1")
-        elif "dl=1" not in url:
-            sep = "&" if "?" in url else "?"
-            return f"{url}{sep}dl=1"
-
-    # --- OneDrive / 1drv.ms ---
-    if "1drv.ms/" in url or "onedrive.live.com/" in url:
-        if "download=1" not in url:
-            sep = "&" if "?" in url else "?"
-            return f"{url}{sep}download=1"
-
     return url
 
 
 def is_cloud_storage_url(url: str) -> bool:
     """Return True if the URL is a known cloud-storage sharing link."""
-    return bool(
-        re.search(_GDRIVE_FILE_RE, url)
-        or re.search(_GDRIVE_OPEN_RE, url)
-        or re.search(_DROPBOX_RE, url)
-        or re.search(_ONEDRIVE_RE, url)
-    )
+    return bool(re.search(_GDRIVE_FILE_RE, url) or re.search(_GDRIVE_OPEN_RE, url))
 
 
 def is_media_url(url: str) -> bool:
@@ -200,7 +175,7 @@ def extract_media_urls(message: str) -> list:
     """Extract media URLs from message (images, videos, documents).
 
     Detection works in three passes:
-    1. Known cloud-storage sharing URLs (Google Drive, Dropbox, OneDrive)
+    1. Known cloud-storage sharing URLs (Google Drive)
        are accepted immediately — they always point to a file.
     2. URLs with a known media extension are matched instantly (no HTTP call).
     3. All remaining URLs are probed with a HEAD request; if the Content-Type

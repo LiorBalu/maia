@@ -31,6 +31,10 @@ class CallManager(Exception):
 
 async def handle_function_called(function_name, arguments, openai_ws, stream_sid, logger, websocket, call_id, request):
     # Handle hangup_call immediately without processing other tools
+    """Run a tool the Realtime model called: hangup_call ends the call (EndCall); other tools go through the registry,
+    their call and response are saved to the conversation, the output is sent back to OpenAI and a new response is
+    requested; call_to_manager then raises CallManager.
+    """
     if function_name == "hangup_call":
         logger.log_event("tool", "📞 Call hangup requested - immediate disconnect", True)
         raise EndCall("Call hangup requested by user")

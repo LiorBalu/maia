@@ -49,6 +49,9 @@ async def telephone_inbound(fast_request: Request, tenant_name: str):
 
 
 async def answer_inbound_call(args: MessageContext):
+    """Save the inbound call as a message, then answer with the TwiML that connects the call to the Realtime stream;
+    manual mode, an inactive bot or missing call settings end the call silently.
+    """
     logger.info(" ".join(str(part) for part in ("\n", "#" * 100)))
     logger.info(" ".join(str(part) for part in ("tenant_name: ", args["tenant_name"], "platform:", args["platform"])))
     logger.info(" ".join(str(part) for part in ("from: ", args["sender_id"], "message: ", args["message_text"])))
@@ -82,6 +85,7 @@ async def answer_inbound_call(args: MessageContext):
 
 
 def save_inbound_call_message(request):
+    """Save the inbound call as a user message of the telephone conversation and keep it in the context."""
     message = MessageDocument(
         platform=request["platform"],
         tenant_name=request["tenant_name"],
@@ -102,6 +106,9 @@ def save_inbound_call_message(request):
 
 @router.post("/telephone/{tenant_name}/call-status", response_class=PlainTextResponse)
 async def telephone_status_callback(request: Request, tenant_name: str):
+    """Twilio status callback: log the call, record the call stats on the conversation for terminal statuses, and
+    reset the telephone conversation when a completed call ends (call_auto_reset on_end).
+    """
     form = await request.form()
 
     ts = datetime.now(timezone.utc).isoformat()

@@ -22,18 +22,21 @@ class ARQPoolManager:
     _pool: Optional[ArqRedis] = None
 
     def __new__(cls):
+        """Singleton: always return the same instance."""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
 
     def __init__(self):
         # Only initialize once
+        """Initialize the pool slot and the lock once."""
         if not hasattr(self, "_initialized"):
             self._initialized = True
             self._pool = None
             self._lock = asyncio.Lock()
 
     def _get_redis_settings(self) -> RedisSettings:
+        """ARQ RedisSettings from REDIS_URL, with short connection timeouts."""
         return get_arq_redis_settings(conn_timeout=10, conn_retries=3, conn_retry_delay=1)
 
     async def get_pool(self) -> ArqRedis:

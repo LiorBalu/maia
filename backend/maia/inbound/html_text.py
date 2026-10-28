@@ -8,14 +8,18 @@ logger = logging.getLogger(__name__)
 
 
 class HTMLTextExtractor(HTMLParser):
+    """HTMLParser that collects the text nodes of an HTML body."""
     def __init__(self):
+        """Start with an empty list of text parts."""
         super().__init__()
         self.text_parts = []
 
     def handle_data(self, data):
+        """Collect a text node."""
         self.text_parts.append(data)
 
     def get_text(self):
+        """The collected text, joined."""
         return "".join(self.text_parts)
 
 

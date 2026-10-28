@@ -33,7 +33,7 @@ def get_or_create_online_conversation(
         and (not conversation.profile_name or conversation.profile_name == customer_id)
     ):
         # Only overwrite when currently unset or still the raw id (e.g. phone number) —
-        # never clobber a real name (from WhatsApp push name, CRM, etc.) that's already there.
+        # never clobber a real name (from the WhatsApp push name) that's already there.
         conversation.profile_name = profile_name
         conversation.save()
 

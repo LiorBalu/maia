@@ -19,6 +19,7 @@ settings_router = APIRouter(prefix="/settings", tags=["Settings"])
 
 @settings_router.get("/chat/{tenant_name}", response_model=ChatSettings)
 async def get_chat_settings(tenant_name: str, user: User = Depends(authenticate_user_token)):
+    """Chat settings of the tenant, created with the default features when missing."""
     chat_settings = ChatSettingsDocument.objects(tenant_name=tenant_name).first()
     if chat_settings is None:
         chat_settings = ChatSettingsDocument(tenant_name=tenant_name)
@@ -35,6 +36,7 @@ async def update_chat_settings(
     tenant_name: str = Depends(get_tenant_name),
     user: User = Depends(authenticate_user_token),
 ):
+    """Update the human-like delay and the feature flags of the tenant's chat settings."""
     chat_settings_doc = ChatSettingsDocument.objects(tenant_name=tenant_name).first()
     if chat_settings_doc is None:
         chat_settings_doc = ChatSettingsDocument(tenant_name=tenant_name)
@@ -54,6 +56,7 @@ async def update_chat_settings(
 
 @settings_router.get("/call/{tenant_name}", response_model=CallSettings)
 async def get_call_settings(tenant_name: str, user: User = Depends(authenticate_user_token)):
+    """Call settings of the tenant, created with the default features when missing."""
     call_settings = CallSettingsDocument.objects(tenant_name=tenant_name).first()
     if call_settings is None:
         call_settings = CallSettingsDocument(tenant_name=tenant_name)
@@ -71,6 +74,7 @@ async def get_call_settings(tenant_name: str, user: User = Depends(authenticate_
 async def update_call_settings(
     tenant_name: str, call_settings: CallSettings, user: User = Depends(authenticate_user_token)
 ):
+    """Update the tenant's call settings in place through odmantic (a plain save would insert a second document)."""
     call_settings.tenant_name = tenant_name
     # Update the tenant's existing document in place; a plain save would insert a second one
     # and the phone pipeline would keep reading the first.

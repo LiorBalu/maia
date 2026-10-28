@@ -89,6 +89,7 @@ scopes_map = {
 
 
 def get_calendar_service(access_token: str, refresh_token: str):
+    """Google Calendar API client for the stored OAuth tokens (the access token is refreshed automatically)."""
     creds = Credentials(
         token=access_token,
         refresh_token=refresh_token,
@@ -375,6 +376,9 @@ async def google_calendar_register(
     pub_sub: bool = Query(False),
     user: User = Depends(authenticate_user_token),
 ):
+    """Build the Google consent URL for the requested scopes (calendar / email / meet). The tenant, the scopes and the
+    PKCE code_verifier travel in the OAuth state; the dashboard opens the URL in a popup.
+    """
     state = json.dumps({"tenant_name": tenant_name, "scopes": scopes, "pub_sub": pub_sub})
 
     scopes_list = scopes.split(",")
@@ -468,6 +472,11 @@ def _oauth_popup_error(message: str) -> HTMLResponse:
 
 @calendar_router.get("/oauth2callback")
 async def oauth2callback(request: Request):
+    """Google redirects here after consent: exchange the code for tokens, read the account email and save or update
+    the GoogleShared records (every calendar of the account for the calendar scope, one record for Gmail / Meet),
+    then register the Gmail watch when asked. Answers with a popup page that posts the result to the dashboard
+    window.
+    """
     query_params = request.query_params
     state = query_params.get("state")
     if not state:
@@ -642,7 +651,9 @@ async def oauth2callback(request: Request):
                 register_email_data = RegisterEmail(email=primary_email)
 
                 class MockUser:
+                    """Minimal stand-in for the user dependency of register_email (only tenants_name is read)."""
                     def __init__(self, tenant_name):
+                        """Store the tenant as the user's only tenant."""
                         self.tenants_name = [tenant_name]
 
                 mock_user = MockUser(tenant_name)
@@ -695,6 +706,7 @@ async def oauth2callback(request: Request):
 
 @calendar_router.get("/all/{tenant_name}")
 async def get_register_calendar(tenant_name: str, user: User = Depends(authenticate_user_token)):
+    """All GoogleShared records (connected Google accounts / calendars) of the tenant, raw."""
     calendars = GoogleShared.objects(tenant_name=tenant_name)
     return CustomJSONResponse(content=[calendar.to_mongo().to_dict() for calendar in calendars])
 
@@ -729,6 +741,7 @@ SCOPE_TYPE_MARKERS = {"calendar": "calendar", "email": "gmail", "meet": "meeting
 
 
 def _stop_gmail_watch(shared: GoogleShared) -> None:
+    """Ask Gmail to stop pushing notifications for this account; errors are only logged."""
     try:
         service = get_email_service(shared.access_token, shared.refresh_token)
         service.users().stop(userId="me").execute()
@@ -786,6 +799,7 @@ async def disconnect_google_shared(
 
 
 class UpdateSharedCalendar(BaseModel):
+    """Body of PATCH /update: default flag, opening hours and the ignore-long-events setting of a calendar."""
     default: Optional[bool] = None
     opening_hours: Optional[List[OpeningHoursModel]] = None
     ignore_long_events: Optional[bool] = None
@@ -798,6 +812,7 @@ async def update_calendar_webhook(
     tenant_name: str = Depends(get_tenant_name),
     user: User = Depends(authenticate_user_token),
 ):
+    """Update a connected calendar: default flag (only one default per tenant), opening hours, ignore_long_events."""
     email = email or user.email
     calendar = GoogleShared.objects(tenant_name=tenant_name, email=email).first()
     if not calendar:
@@ -825,6 +840,9 @@ async def get_events(
     timeMax: Optional[str] = Query(default=None),
     maxResults: Optional[int] = Query(default=None),
 ):
+    """Events of a connected calendar (the requested email, else the user's, else the first one) between timeMin and
+    timeMax, formatted for the dashboard calendar; defaults to last year through next year.
+    """
     if email:
         calendar = GoogleShared.objects(tenant_name=tenant_name, email=email).first()
         if not calendar:
@@ -888,6 +906,7 @@ async def get_events(
 
 
 class EventModel(BaseModel):
+    """Body of the event create / update endpoints."""
     start: str
     end: str
     summary: str
@@ -906,6 +925,9 @@ async def create_or_patch_event(
     user: User = Depends(authenticate_user_token),
     email: Optional[str] = Query(None),
 ):
+    """Create (POST) or update (PATCH with event_id) an event in the tenant's calendar, in the calendar's own
+    timezone; a Meet link can be added.
+    """
     calendar = None
     if email:
         calendar = GoogleShared.objects(tenant_name=tenant_name, email=email).first()
@@ -949,6 +971,9 @@ async def create_or_patch_event(
 async def delete_event(
     tenant_name: str, event_id: str, user: User = Depends(authenticate_user_token), email: Optional[str] = Query(None)
 ):
+    """Delete an event from the tenant's calendar (the requested email, else the user's, else the first connected
+    one).
+    """
     if email:
         calendar = GoogleShared.objects(tenant_name=tenant_name, email=email).first()
     else:

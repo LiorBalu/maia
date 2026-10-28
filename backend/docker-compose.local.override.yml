@@ -1,0 +1,20 @@
+# Local Docker Compose overrides. This file is ignored by Git.
+
+services:
+  mongodb:
+    volumes:
+      - ./mongo_data:/data/db
+      - mongodb-config:/data/configdb
+
+  fastapi:
+    command: python -m uvicorn main:app --host 0.0.0.0 --port 8000
+    environment:
+      MAIA_ENV: DEVELOPMENT
+
+  celery:
+    environment:
+      MAIA_ENV: DEVELOPMENT
+
+  reply-worker:
+    environment:
+      MAIA_ENV: DEVELOPMENT
