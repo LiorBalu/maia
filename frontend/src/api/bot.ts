@@ -70,7 +70,6 @@ export interface Agent {
   is_active: boolean
   model: string
   provider: string
-  temperature: number
   score_threshold: number
   top_k_general: number
   top_k_qa: number
@@ -98,8 +97,30 @@ export async function createAgent(tenant: string, input: AgentInput): Promise<Ag
 
 export const PROVIDERS = ['openai', 'anthropic', 'google'] as const
 
+// OpenAI: newest families first (gpt-6.1 / gpt-6 / gpt-5.6 tiers: astra = strongest, sol = strong,
+// terra = balanced, luna = cheapest), then the dated gpt-5.x releases and the gpt-4 generation.
 export const MODEL_SUGGESTIONS: Record<string, string[]> = {
-  openai: ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'gpt-4o', 'gpt-4o-mini', 'gpt-5', 'gpt-5-mini', 'gpt-5-nano'],
+  openai: [
+    'gpt-6.1-sol',
+    'gpt-6.1-terra',
+    'gpt-6-astra',
+    'gpt-6-sol',
+    'gpt-6-luna',
+    'gpt-5.6-sol',
+    'gpt-5.6-terra',
+    'gpt-5.6-luna',
+    'gpt-5.5',
+    'gpt-5.4',
+    'gpt-5.4-mini',
+    'gpt-5.4-nano',
+    'gpt-5.2',
+    'gpt-5.1',
+    'gpt-4.1',
+    'gpt-4.1-mini',
+    'gpt-4.1-nano',
+    'gpt-4o',
+    'gpt-4o-mini',
+  ],
   anthropic: ['claude-sonnet-4-5', 'claude-haiku-4-5', 'claude-opus-4-1'],
   google: ['gemini-2.5-pro', 'gemini-2.5-flash'],
 }

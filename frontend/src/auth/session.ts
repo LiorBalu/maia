@@ -3,7 +3,7 @@ import { jwtDecode } from 'jwt-decode'
 const TOKEN_KEY = 'maia_jwt'
 const DEVICE_KEY = 'maia_device_id'
 
-export type Role = 'staff' | 'partner' | 'user'
+export type Role = 'staff' | 'user'
 
 export interface SessionUser {
   email: string

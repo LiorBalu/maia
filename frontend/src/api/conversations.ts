@@ -57,8 +57,6 @@ export interface ApiConversation {
   last_message_date?: string | null
   messages: ApiMessage[]
   customer?: ApiCustomer | null
-  summaries?: unknown[]
-  tags?: unknown[]
   meta_data?: Record<string, unknown> | null
 }
 

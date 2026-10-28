@@ -152,8 +152,8 @@ function CreateUserForm({ onClose }: { onClose: () => void }) {
   )
 }
 
-function roleOf(user: ApiUser): 'staff' | 'partner' | 'user' {
-  if (user.role === 'staff' || user.role === 'partner' || user.role === 'user') return user.role
+function roleOf(user: ApiUser): 'staff' | 'user' {
+  if (user.role === 'staff' || user.role === 'user') return user.role
   return user.is_staff ? 'staff' : 'user'
 }
 

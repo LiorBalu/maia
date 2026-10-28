@@ -44,7 +44,6 @@
   },
   "roles": {
     "staff": "אדמין",
-    "partner": "שותף",
     "user": "משתמש עסק"
   },
   "tenants": {
@@ -56,8 +55,6 @@
     "status": {
       "active": "פעיל",
       "inactive": "לא פעיל",
-      "development": "פיתוח",
-      "developer": "פיתוח",
       "pending": "ממתין"
     },
     "channels": {
@@ -281,15 +278,14 @@
     },
     "model": {
       "title": "המודל שעונה",
-      "subtitle": "איזה מודל שפה מנסח את התשובות, ועד כמה הוא \"יצירתי\".",
+      "subtitle": "איזה מודל שפה מנסח את התשובות.",
       "provider": "ספק",
       "providerHelp": "כרגע העסקים עובדים עם OpenAI. ספק אחר דורש מפתח API בבקאנד.",
       "providers": { "openai": "OpenAI", "anthropic": "Anthropic (Claude)", "google": "Google (Gemini)" },
       "providerNotice": "ספק שאינו OpenAI יעבוד רק אם הוגדר לו מפתח בצד השרת.",
       "model": "מודל",
-      "modelHelp": "אפשר לבחור מהרשימה או להקליד שם מודל אחר.",
-      "temperature": "טמפרטורה",
-      "temperatureHelp": "0 = תשובות עקביות וצמודות למידע. 1 = יותר גיוון. לעסק מומלץ 0.2–0.4.",
+      "modelHelp": "ב־OpenAI: astra = החזק והיקר ביותר, sol = חזק, terra = מאוזן, luna = הזול והמהיר. מודל שלא ברשימה: \"אחר\" והקלדה.",
+      "customModel": "אחר (הקלדה ידנית)",
       "defaultDescription": "סוכן ברירת המחדל של העסק",
       "retrievalTitle": "חיפוש במאגר הידע",
       "retrievalSubtitle": "כמה קטעי ידע הבוט מקבל לכל שאלה, ומה סף הדמיון המינימלי.",
@@ -451,8 +447,6 @@
       "voiceHelp2": "marin ו־cedar הם הקולות החדשים והטבעיים ביותר.",
       "speed": "מהירות דיבור",
       "speedHelp": "1 = רגיל.",
-      "temperature": "טמפרטורה",
-      "temperatureHelp": "גיוון בניסוח בזמן השיחה (המינימום שהמודל מאפשר הוא 0.6).",
       "listeningTitle": "זיהוי דיבור",
       "listeningSubtitle": "מתי הבוט מבין שהלקוח סיים לדבר.",
       "threshold": "רגישות לזיהוי דיבור",

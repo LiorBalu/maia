@@ -7,10 +7,12 @@ import { Field, InlineError, InlineNotice, SaveButton, SectionCard, useSavedFlas
 import { ErrorState } from '@/components/States'
 import { errorDetail } from '@/lib/errors'
 
+/** Sentinel value of the "other" option in the model dropdown; never sent to the backend. */
+const CUSTOM_MODEL = '__custom__'
+
 interface FormState {
   provider: string
   model: string
-  temperature: number
   score_threshold: number
   top_k_general: number
   top_k_qa: number
@@ -20,7 +22,6 @@ function fromAgent(agent?: Agent): FormState {
   return {
     provider: agent?.provider ?? 'openai',
     model: agent?.model ?? 'gpt-4.1',
-    temperature: agent?.temperature ?? 0.3,
     score_threshold: agent?.score_threshold ?? 0.5,
     top_k_general: agent?.top_k_general ?? 10,
     top_k_qa: agent?.top_k_qa ?? 5,
@@ -33,7 +34,12 @@ export function ModelTab({ tenant }: { tenant: string }) {
   const agents = useQuery({ queryKey: ['agents', tenant], queryFn: () => listAgents(tenant) })
   const agent = agents.data?.find((a) => a.is_active) ?? agents.data?.[0]
   const [form, setForm] = useState<FormState>(() => fromAgent(agent))
-  useEffect(() => setForm(fromAgent(agent)), [agent])
+  // "Other" in the model dropdown reveals a free-text field for a model id that is not in the list.
+  const [customModel, setCustomModel] = useState(false)
+  useEffect(() => {
+    setForm(fromAgent(agent))
+    setCustomModel(false)
+  }, [agent])
   const dirty = JSON.stringify(form) !== JSON.stringify(fromAgent(agent))
 
   const save = useMutation({
@@ -57,6 +63,8 @@ export function ModelTab({ tenant }: { tenant: string }) {
 
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) => setForm((f) => ({ ...f, [key]: value }))
   const suggestions = MODEL_SUGGESTIONS[form.provider] ?? []
+  // The saved model stays selectable even when it is not in the suggestion list (or belongs to another provider).
+  const modelOptions = [...new Set([...suggestions, form.model])].filter(Boolean)
 
   return (
     <form
@@ -78,22 +86,30 @@ export function ModelTab({ tenant }: { tenant: string }) {
             </select>
           </Field>
           <Field label={t('bot.model.model')} help={t('bot.model.modelHelp')}>
-            <input className="input text-left" dir="ltr" list="model-suggestions" value={form.model} onChange={(e) => set('model', e.target.value)} required />
-            <datalist id="model-suggestions">
-              {suggestions.map((m) => (
-                <option key={m} value={m} />
+            <select
+              className="input text-left"
+              dir="ltr"
+              value={customModel ? CUSTOM_MODEL : form.model}
+              onChange={(e) => {
+                if (e.target.value === CUSTOM_MODEL) {
+                  setCustomModel(true)
+                } else {
+                  setCustomModel(false)
+                  set('model', e.target.value)
+                }
+              }}
+            >
+              {modelOptions.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
               ))}
-            </datalist>
+              <option value={CUSTOM_MODEL}>{t('bot.model.customModel')}</option>
+            </select>
+            {customModel && (
+              <input className="input mt-2 text-left" dir="ltr" value={form.model} onChange={(e) => set('model', e.target.value)} placeholder="gpt-…" required autoFocus />
+            )}
           </Field>
-          <RangeField
-            label={t('bot.model.temperature')}
-            help={t('bot.model.temperatureHelp')}
-            value={form.temperature}
-            min={0}
-            max={1}
-            step={0.05}
-            onChange={(v) => set('temperature', v)}
-          />
           {form.provider !== 'openai' && <InlineNotice>{t('bot.model.providerNotice')}</InlineNotice>}
         </div>
       </SectionCard>

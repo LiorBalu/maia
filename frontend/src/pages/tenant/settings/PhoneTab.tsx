@@ -185,7 +185,6 @@ function CallSettingsForm({ tenant, settings }: { tenant: string; settings: Call
             </select>
           </Field>
           <RangeField label={t('settings.phone.speed')} help={t('settings.phone.speedHelp')} value={form.openai_speed} min={0.5} max={1.5} step={0.05} onChange={(v) => setForm({ ...form, openai_speed: v })} />
-          <RangeField label={t('settings.phone.temperature')} help={t('settings.phone.temperatureHelp')} value={conf.temperature} min={0.6} max={1.2} step={0.05} onChange={(v) => setConf({ temperature: v })} />
         </div>
       </SectionCard>
 

@@ -28,13 +28,8 @@ export function ChannelBadge({ channel }: { channel: Channel }) {
   )
 }
 
-export function RoleBadge({ role }: { role: 'staff' | 'partner' | 'user' }) {
+export function RoleBadge({ role }: { role: 'staff' | 'user' }) {
   const { t } = useTranslation()
-  const tone =
-    role === 'staff'
-      ? 'bg-brand-600 text-white'
-      : role === 'partner'
-        ? 'bg-brand-100 text-brand-800'
-        : 'bg-slate-100 text-slate-700'
+  const tone = role === 'staff' ? 'bg-brand-600 text-white' : 'bg-slate-100 text-slate-700'
   return <span className={clsx('badge', tone)}>{t(`roles.${role}`)}</span>
 }

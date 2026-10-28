@@ -18,7 +18,7 @@ export async function login(email: string, password: string): Promise<LoginRespo
   return data
 }
 
-export type Role = 'staff' | 'partner' | 'user'
+export type Role = 'staff' | 'user'
 
 export interface ApiUser {
   email: string
