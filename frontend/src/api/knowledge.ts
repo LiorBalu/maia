@@ -13,7 +13,6 @@ export interface KnowledgeDocument {
   is_indexed: boolean
   created_at: string
   updated_at: string
-  is_protected?: boolean
   categories?: string[]
 }
 
@@ -33,7 +32,7 @@ export interface DocumentPart {
   vector_id?: string | null
 }
 
-export const DOCUMENT_ACCEPT = '.pdf,.doc,.docx,.txt,.xls,.xlsx,.csv'
+export const DOCUMENT_ACCEPT = '.pdf,.docx,.txt,.xls,.xlsx,.csv'
 
 export async function listDocuments(tenant: string): Promise<KnowledgeDocument[]> {
   const { data } = await api.get<KnowledgeDocument[]>('/management/v1/embedded_documents/', { params: { tenant_name: tenant } })

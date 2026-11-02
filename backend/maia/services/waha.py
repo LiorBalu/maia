@@ -1,7 +1,9 @@
 """WahaService: the WAHA HTTP API (sessions, sending text / media, webhooks) for a tenant's WhatsApp number."""
 
 import logging
+import time
 import uuid
+from datetime import datetime, timezone
 from os import getenv
 
 import requests
@@ -22,9 +24,12 @@ WAHA_WEBHOOK_EVENTS = [
     "session.status",
 ]
 
+# How long "show QR" waits for a freshly (re)started session to reach SCAN_QR_CODE (NOWEB needs ~1-3 s).
+QR_WAIT_SECONDS = 15
 
-def get_default_waha_url() -> str:
-    """Default WAHA server, used for accounts that have no server_url assigned."""
+
+def get_waha_base_url() -> str:
+    """Base URL of the WAHA server (WAHA_BASE_URL, http://waha:3000 inside docker compose)."""
     return getenv("WAHA_BASE_URL", "http://localhost:3000").rstrip("/")
 
 
@@ -34,58 +39,12 @@ def get_waha_webhook_base_url() -> str:
     return (getenv("WAHA_WEBHOOK_BASE_URL") or getenv("BACKEND_URL", "http://localhost:8000")).rstrip("/")
 
 
-def get_waha_worker_urls() -> list[str]:
-    """Ordered WAHA worker fleet from WAHA_WORKER_URLS (comma-separated). Empty = no fleet."""
-    raw = getenv("WAHA_WORKER_URLS", "")
-    return [url.strip().rstrip("/") for url in raw.split(",") if url.strip()]
-
-
-def get_known_waha_base_urls() -> list[str]:
-    """All base URLs a WAHA media link can originate from (default server + every worker)."""
-    return [get_default_waha_url(), *get_waha_worker_urls()]
-
-
-def count_waha_accounts_per_server() -> dict[str, int]:
-    """Count assigned WAHA accounts per server_url across all tenants (accounts on the default server excluded)."""
-    pipeline = [
-        {"$unwind": "$waha_accounts"},
-        {"$match": {"waha_accounts.server_url": {"$nin": [None, ""]}}},
-        {"$group": {"_id": "$waha_accounts.server_url", "count": {"$sum": 1}}},
-    ]
-    return {doc["_id"].rstrip("/"): doc["count"] for doc in TenantDocument.objects.aggregate(pipeline)}
-
-
-def pick_waha_server_url() -> str | None:
-    """Pick the worker for a new account: fill worker 1 up to capacity, then worker 2, and so on.
-
-    Returns None when no fleet is configured (account will use the default server).
-    Raises 503 when every worker is at capacity — add a worker to WAHA_WORKER_URLS.
-    """
-    workers = get_waha_worker_urls()
-    if not workers:
-        return None
-
-    max_sessions = int(getenv("WAHA_WORKER_MAX_SESSIONS", "10"))
-    counts = count_waha_accounts_per_server()
-    for url in workers:
-        if counts.get(url, 0) < max_sessions:
-            return url
-
-    raise HTTPException(
-        status_code=503,
-        detail=f"All {len(workers)} WAHA workers are at capacity ({max_sessions} sessions each). "
-        "Add a new worker to WAHA_WORKER_URLS.",
-    )
-
-
 class WahaService:
     """HTTP client of one WAHA session (the tenant's connected WhatsApp number): session lifecycle, QR, status,
     sending text and files, LID resolution.
     """
     def __init__(self, tenant_name: str, phone_number: str, **kwargs):
-        """Resolve the account of the number (falling back to the tenant's sole account) and its WAHA server; needs
-        WAHA_API_KEY.
-        """
+        """Resolve the account of the number (falling back to the tenant's sole account); needs WAHA_API_KEY."""
         self.tenant_name = tenant_name
         self.phone_number = phone_number
         self.api_key = getenv("WAHA_API_KEY", "")
@@ -104,8 +63,7 @@ class WahaService:
         account_phone = getattr(self.account, "phone_number", None)
         if account_phone and account_phone != self.phone_number:
             self.phone_number = account_phone
-        # Each account is pinned to one WAHA worker; accounts without one use the default server
-        self.base_url = (self.account.server_url or "").rstrip("/") or get_default_waha_url()
+        self.base_url = get_waha_base_url()
 
     def _get_account_info(self) -> WahaAccount:
         """Get WAHA account info from TenantDocument"""
@@ -131,110 +89,153 @@ class WahaService:
         return account
 
     def _url(self, endpoint: str) -> str:
-        """Full URL of a WAHA endpoint on this account's server."""
+        """Full URL of a WAHA endpoint."""
         return f"{self.base_url}{endpoint}"
 
     def _headers(self) -> dict:
         """Get headers with API Key for WAHA Pro"""
         return {"X-Api-Key": self.api_key, "Content-Type": "application/json"}
 
-    def _update_connection_status(self, is_connected: bool):
-        """Update connection status in TenantDocument"""
+    def _update_account(self, **fields):
+        """Set fields on this number's WahaAccount in the tenant document and save."""
         tenant = TenantDocument.objects(name=self.tenant_name).first()
-        if tenant:
-            for account in tenant.waha_accounts:
-                if account.phone_number.replace("+", "") == self.phone_number.replace("+", ""):
-                    account.is_connected = is_connected
-                    tenant.save()
-                    break
+        if not tenant:
+            return
+        for account in tenant.waha_accounts:
+            if account.phone_number.replace("+", "") == self.phone_number.replace("+", ""):
+                for key, value in fields.items():
+                    setattr(account, key, value)
+                tenant.save()
+                break
 
-    def create_whatsapp_client(self) -> dict:
-        """Create WhatsApp session in WAHA Pro and set webhook automatically"""
-        webhook_url = f"{get_waha_webhook_base_url()}/api/async/waha/{self.tenant_name}"
+    def _record_status(self, status: str | None):
+        """Mirror a status WAHA reported into the account (webhooks do the same, but a session's webhook can point
+        at another tenant, so the dashboard must not rely on them alone)."""
+        if status:
+            self._update_account(
+                is_connected=status == "WORKING", session_status=status, last_status_update=datetime.now(timezone.utc)
+            )
 
-        url = self._url("/api/sessions/start")
-        payload = {
-            "name": self.phone_number,
-            "config": {
-                "webhooks": [
-                    {
-                        "url": webhook_url,
-                        "events": WAHA_WEBHOOK_EVENTS,
-                        "customHeaders": [{"name": "X-Tenant-Name", "value": self.tenant_name}],
-                    }
-                ],
-                "metadata": {"tenant_name": self.tenant_name},
-                "noweb": {"store": {"enabled": True, "fullSync": False}},
-            },
+    def _webhook_url(self) -> str:
+        """Where WAHA posts this tenant's events."""
+        return f"{get_waha_webhook_base_url()}/api/async/waha/{self.tenant_name}"
+
+    def _session_config(self, webhook_url: str) -> dict:
+        """The session config Maia needs: our webhook with its events, the tenant name, a NOWEB store."""
+        return {
+            "webhooks": [
+                {
+                    "url": webhook_url,
+                    "events": WAHA_WEBHOOK_EVENTS,
+                    "customHeaders": [{"name": "X-Tenant-Name", "value": self.tenant_name}],
+                }
+            ],
+            "metadata": {"tenant_name": self.tenant_name},
+            "noweb": {"store": {"enabled": True, "fullSync": False}},
         }
-        response = requests.post(url, json=payload, headers=self._headers())
 
-        # If session already exists (422), just return success and update webhook
-        if response.status_code == 422:
-            # Session already exists, update webhook configuration
-            self.set_webhook(webhook_url)
-            return {"name": self.phone_number, "status": "ALREADY_EXISTS", "message": "Session already started"}
-
-        if response.status_code not in [200, 201]:
-            raise HTTPException(status_code=response.status_code, detail=response.text)
-
-        # Update webhook URL in TenantDocument
-        tenant = TenantDocument.objects(name=self.tenant_name).first()
-        if tenant:
-            for account in tenant.waha_accounts:
-                if account.phone_number.replace("+", "") == self.phone_number.replace("+", ""):
-                    account.webhook_url = webhook_url
-                    tenant.save()
-                    break
-
-        return response.json()
-
-    def get_qr_code(self) -> dict:
-        """Get QR code for WhatsApp connection"""
-        url = self._url(f"/api/{self.phone_number}/auth/qr")
-        headers = self._headers()
-        headers["Accept"] = "application/json"
-        response = requests.get(url, headers=headers)
-
+    def get_session(self) -> dict | None:
+        """The WAHA session of this number (`status`, `config`, `me`...), or None when WAHA has no such session."""
+        response = requests.get(self._url(f"/api/sessions/{self.phone_number}"), headers=self._headers())
+        if response.status_code == 404:
+            return None
         if response.status_code != 200:
             raise HTTPException(status_code=response.status_code, detail=response.text)
+        return response.json()
 
+    def _start_or_restart(self, status: str | None):
+        """Bring a STOPPED session up (`/start`) or a FAILED one back (`/restart`; WAHA refuses `/start` on it).
+        Any other status is already running."""
+        if status == "STOPPED":
+            endpoint = "start"
+        elif status == "FAILED":
+            endpoint = "restart"
+        else:
+            return
+        response = requests.post(self._url(f"/api/sessions/{self.phone_number}/{endpoint}"), headers=self._headers())
+        # 422 = "already started": someone else won the race, which is fine.
+        if response.status_code not in [200, 201, 422]:
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+
+    def create_whatsapp_client(self) -> dict:
+        """Create (or re-point) the WAHA session of this number with this tenant's webhook, and start it.
+
+        A session that already exists keeps nothing from before: `PUT /api/sessions/{name}` replaces its config
+        (WAHA restarts it when it is running), then a STOPPED/FAILED one is started. The old
+        `POST /api/sessions/start` started an existing session with its stale config, i.e. with another tenant's
+        webhook when the number had been linked elsewhere.
+        """
+        webhook_url = self._webhook_url()
+        config = self._session_config(webhook_url)
+        session = self.get_session()
+
+        if session is None:
+            payload = {"name": self.phone_number, "start": True, "config": config}
+            response = requests.post(self._url("/api/sessions"), json=payload, headers=self._headers())
+            if response.status_code not in [200, 201]:
+                raise HTTPException(status_code=response.status_code, detail=response.text)
+        else:
+            self.set_webhook(webhook_url)
+            self._start_or_restart((self.get_session() or {}).get("status"))
+
+        self._update_account(webhook_url=webhook_url)
+        session = self.get_session() or {"name": self.phone_number}
+        self._record_status(session.get("status"))
+        return session
+
+    def get_qr_code(self) -> dict:
+        """The QR image (JSON with base64 `data`) the owner scans from the phone.
+
+        WAHA drops an unscanned QR after ~2.5 minutes and marks the session FAILED, and refuses a QR in any status
+        but SCAN_QR_CODE; so a missing session is created, a STOPPED/FAILED one is (re)started, and the call waits
+        up to QR_WAIT_SECONDS for SCAN_QR_CODE. 409 when the number is already connected (WORKING).
+        """
+        session = self.get_session()
+        if session is None:
+            self.create_whatsapp_client()
+        else:
+            self._start_or_restart(session.get("status"))
+
+        status = None
+        deadline = time.monotonic() + QR_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            status = (self.get_session() or {}).get("status")
+            if status == "SCAN_QR_CODE":
+                break
+            if status == "WORKING":
+                self._record_status(status)
+                raise HTTPException(status_code=409, detail="This number is already connected (WORKING); no QR is needed")
+            time.sleep(0.5)
+        self._record_status(status)
+        if status != "SCAN_QR_CODE":
+            raise HTTPException(
+                status_code=503,
+                detail=f"WAHA session is {status or 'missing'} and did not reach SCAN_QR_CODE within {QR_WAIT_SECONDS}s; try again",
+            )
+
+        headers = self._headers()
+        headers["Accept"] = "application/json"
+        response = requests.get(self._url(f"/api/{self.phone_number}/auth/qr"), headers=headers)
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"WAHA did not return a QR (session status {status}): {response.text[:200]}",
+            )
         return response.json()
 
     def set_webhook(self, webhook_url: str) -> dict:
-        """Set webhook for WhatsApp connection"""
-        url = self._url(f"/api/sessions/{self.phone_number}")
-        payload = {
-            "config": {
-                "webhooks": [
-                    {
-                        "url": webhook_url,
-                        "events": WAHA_WEBHOOK_EVENTS,
-                        "customHeaders": [{"name": "X-Tenant-Name", "value": self.tenant_name}],
-                    }
-                ],
-                "metadata": {"tenant_name": self.tenant_name},
-                "noweb": {"store": {"enabled": True, "fullSync": False}},
-            }
-        }
-        response = requests.put(url, json=payload, headers=self._headers())
+        """Replace the session config with ours (`PUT`; WAHA restarts a running session) and remember the URL."""
+        payload = {"config": self._session_config(webhook_url)}
+        response = requests.put(self._url(f"/api/sessions/{self.phone_number}"), json=payload, headers=self._headers())
 
         if response.status_code not in [200, 201]:
             raise HTTPException(status_code=response.status_code, detail=response.text)
 
-        # Update webhook URL in TenantDocument
-        tenant = TenantDocument.objects(name=self.tenant_name).first()
-        if tenant:
-            for account in tenant.waha_accounts:
-                if account.phone_number.replace("+", "") == self.phone_number.replace("+", ""):
-                    account.webhook_url = webhook_url
-                    tenant.save()
-                    break
-
+        self._update_account(webhook_url=webhook_url)
         return response.json()
 
     def get_client_status(self) -> dict:
-        """Get WhatsApp client status"""
+        """The session as WAHA sees it; its status (STOPPED, STARTING, SCAN_QR_CODE, WORKING, FAILED) is stored."""
         url = self._url(f"/api/sessions/{self.phone_number}")
         response = requests.get(url, headers=self._headers())
 
@@ -242,12 +243,7 @@ class WahaService:
             raise HTTPException(status_code=response.status_code, detail=response.text)
 
         status_data = response.json()
-
-        # Update connection status in local DB
-        # WAHA uses 'status' field: STOPPED, STARTING, SCAN_QR_CODE, WORKING, FAILED
-        is_connected = status_data.get("status") == "WORKING"
-        self._update_connection_status(is_connected)
-
+        self._record_status(status_data.get("status"))
         return status_data
 
     def disconnect_client(self) -> dict:
@@ -258,8 +254,7 @@ class WahaService:
         if response.status_code != 200:
             raise HTTPException(status_code=response.status_code, detail=response.text)
 
-        # Update connection status to false
-        self._update_connection_status(False)
+        self._update_account(is_connected=False)
 
         return response.json()
 
@@ -271,8 +266,7 @@ class WahaService:
         if response.status_code not in [200, 201]:
             raise HTTPException(status_code=response.status_code, detail=response.text)
 
-        # Update connection status to false
-        self._update_connection_status(False)
+        self._update_account(is_connected=False, session_status="STOPPED", last_status_update=datetime.now(timezone.utc))
 
         return response.json()
 
@@ -371,159 +365,6 @@ class WahaService:
 
         return {"sid": primary_sid, "fake_sid": primary_sid, "media_sids": media_sids, "text_sid": text_sid}
 
-    # Known media file extensions
-    MEDIA_EXTENSIONS = {
-        ".jpg",
-        ".jpeg",
-        ".png",
-        ".gif",
-        ".webp",
-        ".bmp",
-        ".mp4",
-        ".avi",
-        ".mov",
-        ".wmv",
-        ".flv",
-        ".webm",
-        ".mkv",
-        ".mp3",
-        ".ogg",
-        ".opus",
-        ".wav",
-        ".m4a",
-        ".aac",
-        ".pdf",
-        ".doc",
-        ".docx",
-        ".xls",
-        ".xlsx",
-        ".ppt",
-        ".pptx",
-        ".csv",
-        ".txt",
-        ".zip",
-        ".rar",
-    }
-
-    # Content-Type prefixes that indicate a sendable file
-    MEDIA_CONTENT_TYPES = (
-        "image/",
-        "video/",
-        "audio/",
-        "application/pdf",
-        "application/msword",
-        "application/vnd.openxmlformats-officedocument",
-        "application/vnd.ms-excel",
-        "application/vnd.ms-powerpoint",
-        "application/zip",
-        "application/x-rar",
-        "application/octet-stream",
-        "text/csv",
-    )
-
-    # Patterns for cloud storage sharing URLs that need conversion
-    _GDRIVE_FILE_RE = r"drive\.google\.com/file/d/([a-zA-Z0-9_-]+)"
-    _GDRIVE_OPEN_RE = r"drive\.google\.com/open\?id=([a-zA-Z0-9_-]+)"
-
-    @staticmethod
-    def _to_direct_download_url(url: str) -> str:
-        """Convert cloud-storage sharing URLs to direct-download equivalents.
-
-        Supported service: Google Drive (/file/d/ID/view  or  /open?id=ID).
-
-        Returns the original URL unchanged if no conversion applies.
-        """
-        import re
-
-        # --- Google Drive ---
-        m = re.search(r"drive\.google\.com/file/d/([a-zA-Z0-9_-]+)", url)
-        if m:
-            return f"https://drive.google.com/uc?export=download&id={m.group(1)}"
-        m = re.search(r"drive\.google\.com/open\?id=([a-zA-Z0-9_-]+)", url)
-        if m:
-            return f"https://drive.google.com/uc?export=download&id={m.group(1)}"
-
-        return url
-
-    def _is_cloud_storage_url(self, url: str) -> bool:
-        """Return True if the URL is a known cloud-storage sharing link."""
-        import re
-
-        return bool(re.search(self._GDRIVE_FILE_RE, url) or re.search(self._GDRIVE_OPEN_RE, url))
-
-    def extract_media_urls(self, message: str) -> list:
-        """Extract media URLs from message (images, videos, documents).
-
-        Detection works in three passes:
-        1. Known cloud-storage sharing URLs (Google Drive)
-           are accepted immediately — they always point to a file.
-        2. URLs with a known media extension are matched instantly (no HTTP call).
-        3. All remaining URLs are probed with a HEAD request; if the Content-Type
-           or Content-Disposition header indicates a downloadable file the URL is
-           included.
-        """
-        import re
-
-        # Match markdown links [text](url) and bare http(s) URLs
-        url_pattern = r"(?:\[[^\]]*\]\()?(?P<url>https?://[^\s\)\]]+)(?:\))?"
-        matches = re.finditer(url_pattern, message, re.IGNORECASE)
-        media_urls = []
-
-        for match in matches:
-            url = match.group("url")
-            if not url or url in media_urls:
-                continue
-
-            # Strip trailing punctuation that is not part of the URL
-            url = url.rstrip(".,;:!?")
-
-            # Pass 1: known cloud-storage sharing links
-            if self._is_cloud_storage_url(url):
-                media_urls.append(url)
-                continue
-
-            # Pass 2: URL path has a known media extension
-            url_path = url.lower().split("?")[0].split("#")[0]
-            has_known_ext = any(url_path.endswith(ext) for ext in self.MEDIA_EXTENSIONS)
-
-            if has_known_ext:
-                media_urls.append(url)
-            else:
-                # Pass 3: probe with HEAD to check Content-Type
-                if self._is_media_url(url):
-                    media_urls.append(url)
-
-        return media_urls
-
-    def _is_media_url(self, url: str) -> bool:
-        """Return True if *url* points to a downloadable media / document file.
-
-        Performs a lightweight HEAD request first; falls back to a streamed GET
-        for servers that do not support HEAD.
-        """
-        try:
-            # Convert cloud URLs before probing
-            probe_url = self._to_direct_download_url(url)
-
-            resp = requests.head(probe_url, timeout=5, allow_redirects=True)
-            if resp.status_code >= 400:
-                resp = requests.get(probe_url, timeout=5, stream=True, allow_redirects=True)
-
-            content_type = resp.headers.get("Content-Type", "").lower()
-            for media_type in self.MEDIA_CONTENT_TYPES:
-                if content_type.startswith(media_type):
-                    return True
-
-            # Content-Disposition with attachment/filename means a downloadable file
-            content_disposition = resp.headers.get("Content-Disposition", "")
-            if "attachment" in content_disposition or "filename" in content_disposition:
-                return True
-
-            return False
-        except Exception as e:
-            logger.error(f"Warning: Could not check URL type for {url}: {e}")
-            return False
-
     def _resolve_filename(self, media_url: str, mimetype: str, download_filename: str | None = None) -> str:
         """Build a human-readable filename for the file being sent.
 
@@ -566,29 +407,6 @@ class WahaService:
         ext = EXT_OVERRIDES.get(clean_mime, ext) or ".bin"
 
         return f"file{ext}"
-
-    def clean_message_from_urls(self, message: str, media_urls: list) -> str:
-        """Remove media URLs and markdown links from message"""
-        import re
-
-        cleaned_message = message
-
-        # Remove markdown links containing media URLs: [text](url)
-        for url in media_urls:
-            # Escape special regex characters in URL
-            escaped_url = re.escape(url)
-            # Remove markdown format [text](url)
-            pattern = r"\[([^\]]*)\]\(" + escaped_url + r"\)"
-            cleaned_message = re.sub(pattern, "", cleaned_message)
-            # Remove bare URL
-            cleaned_message = cleaned_message.replace(url, "")
-
-        # Clean up extra whitespace and newlines
-        cleaned_message = re.sub(r"\n\s*\n", "\n", cleaned_message)  # Multiple newlines
-        cleaned_message = re.sub(r"  +", " ", cleaned_message)  # Multiple spaces
-        cleaned_message = cleaned_message.strip()
-
-        return cleaned_message
 
     def send_whatsapp_file(self, phone_number: str, message: str, media_url: str, **kwargs) -> dict:
         """Send a file via WhatsApp using URL or base64

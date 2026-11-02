@@ -1,10 +1,8 @@
-"""The phone call itself: Twilio media stream (mu-law audio) bridged to the OpenAI Realtime session, with tool calls and hand-off."""
+"""The phone call itself: Twilio media stream (mu-law audio) bridged to the OpenAI Realtime session, with tool calls."""
 
 import logging
 import asyncio
 import base64
-
-# from twilio.rest import Client  # Currently unused - commented out manager logic
 import datetime
 import json
 
@@ -20,9 +18,8 @@ from maia.models.prompts import PromptDocument
 from maia.models.tenants import TenantDocument
 from maia.models.settings import CallSettingsDocument, ChatSettingsDocument
 from maia.utils.conversation.get_or_create import get_or_create_online_conversation
-from maia.voice.call_control import CallManager, EndCall, handle_function_called
+from maia.voice.call_control import EndCall, handle_function_called
 from maia.voice.session import initialize_session, realtime_model
-from maia.voice.audio_preprocessing import build_preprocessor_from_settings
 from maia.voice.logger import SimpleLogger
 
 log = logging.getLogger(__name__)
@@ -57,8 +54,6 @@ def build_message_context(tenant_name, from_number, called_number, call_settings
         message_type=None,
         media_url=None,
         media_content_type=None,
-        extra_prompt_name=None,
-        additional_context="",
         meta_data={},
         tool_names=[],
         tool_schemas=[],
@@ -100,9 +95,7 @@ async def handle_media_stream(websocket: WebSocket, tenant_name: str, from_numbe
             chatbot_service.realtime_ws_url(realtime_model()),
             extra_headers={"Authorization": f"Bearer {chatbot_service.api_key}"},
         ) as openai_ws:
-            await initialize_session(
-                openai_ws, initialize_session_instructions, call_settings, tenant_name, request, is_first_message=True
-            )
+            await initialize_session(openai_ws, initialize_session_instructions, call_settings, tenant_name, request)
 
             # Connection specific state
             stream_sid = None
@@ -111,9 +104,6 @@ async def handle_media_stream(websocket: WebSocket, tenant_name: str, from_numbe
             mark_queue = []
             response_start_timestamp_twilio = None
             is_first_assistant_response = True
-
-            # Per-call audio preprocessor (noise suppression / AGC / VAD gate).
-            audio_preprocessor = build_preprocessor_from_settings(call_settings)
 
             current_time = None
 
@@ -127,8 +117,6 @@ async def handle_media_stream(websocket: WebSocket, tenant_name: str, from_numbe
                         if data["event"] == "media" and openai_ws and openai_ws.open:
                             latest_media_timestamp = int(data["media"]["timestamp"])
                             payload_b64 = data["media"]["payload"]
-                            if audio_preprocessor is not None:
-                                payload_b64 = audio_preprocessor.process(payload_b64)
                             audio_append = {"type": "input_audio_buffer.append", "audio": payload_b64}
 
                             await openai_ws.send(json.dumps(audio_append))
@@ -136,9 +124,6 @@ async def handle_media_stream(websocket: WebSocket, tenant_name: str, from_numbe
 
                         elif data["event"] == "start":
                             stream_sid = data["start"]["streamSid"]
-                            if audio_preprocessor is not None:
-                                log.info(f"NOISE_SUPPRESSION_STREAM_ATTACHED provider=openai_realtime stream_sid={stream_sid} "
-                                    f"tenant={tenant_name}")
                             logger.log_event("system", f"✓ Stream started: {stream_sid}", True)
                             response_start_timestamp_twilio = None
                             latest_media_timestamp = 0
@@ -158,10 +143,6 @@ async def handle_media_stream(websocket: WebSocket, tenant_name: str, from_numbe
                 except Exception as e:
                     logger.log_event("error", f"❌ Error in receive_from_twilio: {str(e)}", True)
                 finally:
-                    if audio_preprocessor is not None:
-                        summary = audio_preprocessor.stats_summary()
-                        log.info(f"NOISE_SUPPRESSION_SUMMARY provider=openai_realtime tenant={tenant_name} "
-                            f"stream_sid={stream_sid or '-'} {summary}")
                     # Always close OpenAI WebSocket when Twilio disconnects
                     if openai_ws and openai_ws.open:
                         try:
@@ -236,19 +217,9 @@ async def handle_media_stream(websocket: WebSocket, tenant_name: str, from_numbe
                                 logger.log_event("transcript", f"🤖 Assistant: {full_response}", True)
                                 record_user_message(text=full_response, role="assistant")
                                 current_response = []  # Reset for next response
-                                # Update session configuration after first response
+                                # The greeting is over: from now on the caller can interrupt the bot.
                                 if is_first_assistant_response:
                                     is_first_assistant_response = False
-
-                                    # # Lower threshold after first message
-                                    # await initialize_session(
-                                    #     openai_ws,
-                                    #     initialize_session_instructions,
-                                    #     call_settings,
-                                    #     tenant_name,
-                                    #     request,
-                                    #     is_first_message=False,
-                                    # )
 
                         # Print debug information for transcription events
                         if response.get("type") in [
@@ -290,27 +261,6 @@ async def handle_media_stream(websocket: WebSocket, tenant_name: str, from_numbe
 
                     # If we exit the loop normally (not by exception), it means OpenAI disconnected
                     logger.log_event("system", "OpenAI WebSocket disconnected normally", True)
-
-                except CallManager:
-                    # i want stop the websocket stream and call to manager
-                    log.error("CallManager exception triggered: handoff logic invoked.")
-                    logger.log_event("system", "CallManager exception: hand to manager", True)
-                    try:
-                        await websocket.send_json({"event": "end", "streamSid": stream_sid})
-                    except Exception as ex:
-                        logger.log_event("error", f"❌ Sending 'end' event failed: {str(ex)}", True)
-                    try:
-                        if openai_ws.open:
-                            await openai_ws.close()
-                    except Exception as ex:
-                        logger.log_event("error", f"❌ Error closing openai_ws: {str(ex)}", True)
-                    try:
-                        await websocket.close()
-                    except Exception as ex:
-                        logger.log_event("error", f"❌ Error closing Twilio websocket: {str(ex)}", True)
-
-                    logger.log_event("system", "Call handed off to manager", True)
-                    return
 
                 except EndCall as e:
                     log.error(f"End call requested by user: {str(e)}")

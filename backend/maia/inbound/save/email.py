@@ -225,9 +225,8 @@ async def save_email_message(data: dict, tenant_name: Optional[str] = None) -> S
                                 "reply_job",
                                 tenant_name,
                                 str(customer.email),
-                                {},
+                                None,  # agent_config: the worker loads the tenant's AgentDocument
                                 str(msg.id),
-                                False,  # single_message_mode
                                 msg.conversation_id,  # conversation_id
                                 _defer_by=0,
                                 _job_id=f"gen:{msg.id}",

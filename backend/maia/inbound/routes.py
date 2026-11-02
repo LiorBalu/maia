@@ -1,7 +1,6 @@
 """Inbound webhooks `/api/async/{platform}/{tenant}`: parse the platform payload, save the message, dispatch the reply (inline or ARQ)."""
 
 import asyncio
-import json
 import logging
 from os import getenv
 from typing import Literal, Optional
@@ -46,10 +45,6 @@ async def webhook_for_tenant(
         default=None, description="Sender address: phone number, email address, or platform-specific ID."
     ),
     To: Optional[str] = Form(default=None, description="Recipient address (the bot's phone number, email, etc.)."),
-    agent: Optional[str] = Form(
-        default=None,
-        description="JSON-encoded agent override configuration. Allows selecting a specific agent at call time.",
-    ),
     file: Optional[UploadFile] = File(None, description="Optional file attachment sent alongside the message."),
 ):
     """
@@ -66,12 +61,11 @@ async def webhook_for_tenant(
         Body        – Text content of the incoming message.
         From        – Sender address (phone number, email, etc.).
         To          – Recipient address.
-        agent       – JSON-encoded agent override configuration.
         file        – Optional file attachment uploaded with the message.
 
     Always returns HTTP 200 to prevent webhook retry storms, even when an error occurs.
     """
-    return await _handle_message(fast_request=fast_request, platform=platform, tenant_name=tenant_name, agent=agent)
+    return await _handle_message(fast_request=fast_request, platform=platform, tenant_name=tenant_name)
 
 
 @router.post("/{platform}", response_class=PlainTextResponse)
@@ -86,23 +80,17 @@ async def webhook_without_tenant(
         default=None, description="Sender address: phone number, email address, or platform-specific ID."
     ),
     To: Optional[str] = Form(default=None, description="Recipient address (the bot's phone number, email, etc.)."),
-    agent: Optional[str] = Form(
-        default=None,
-        description="JSON-encoded agent override configuration. Allows selecting a specific agent at call time.",
-    ),
     file: Optional[UploadFile] = File(None, description="Optional file attachment sent alongside the message."),
 ):
     """The same webhook without a tenant in the path (Gmail push posts here: the tenant is resolved from the mailbox).
     """
-    return await _handle_message(fast_request=fast_request, platform=platform, tenant_name=None, agent=agent)
+    return await _handle_message(fast_request=fast_request, platform=platform, tenant_name=None)
 
 
-async def _handle_message(fast_request: Request, platform: str, tenant_name: Optional[str], agent: Optional[str]):
+async def _handle_message(fast_request: Request, platform: str, tenant_name: Optional[str]):
     """Read the body (form for web, JSON otherwise, 5 s timeout), save and dispatch the message, and always answer 200
     (270 on body timeout / disconnect, 271 on error) so the platform never retries.
     """
-    request_start_time = asyncio.get_event_loop().time()
-
     try:
         # Parse request body with timeout to prevent hanging connections
         try:
@@ -118,15 +106,7 @@ async def _handle_message(fast_request: Request, platform: str, tenant_name: Opt
             return PlainTextResponse("", status_code=270)
 
         # Save the message, then generate the reply (inline or through ARQ)
-        result = await process_message(platform=platform, tenant_name=tenant_name, agent=agent, request_body=request_body)
-
-        # Log response time for monitoring
-        response_time = (asyncio.get_event_loop().time() - request_start_time) * 1000
-        if response_time > 1000:  # Log if taking more than 1 second
-            pass
-            # logger.error(
-            #     f"Slow webhook response: {platform}/{tenant_name} took {response_time:.2f}ms"
-            # )
+        result = await process_message(platform=platform, tenant_name=tenant_name, request_body=request_body)
 
         # Return 200 immediately to acknowledge receipt
         # For web platform, result might contain data
@@ -153,11 +133,9 @@ async def dispatch_reply(
     pool: ArqRedis,
     tenant_name: str,
     sender_id: str,
-    agent_config: Optional[dict],
     delay: int,
     should_await: bool,
     task_message_id: Optional[str] = None,
-    single_message_mode: bool = False,
     conversation_id: Optional[str] = None,
 ) -> Optional[str]:
     """
@@ -167,11 +145,9 @@ async def dispatch_reply(
         pool: ARQ Redis pool
         tenant_name: Tenant name
         sender_id: Sender/user ID
-        agent_config: Optional agent configuration
         delay: Delay in seconds before processing
         should_await: If True, await the task result. If False, fire and forget.
         task_message_id: Optional ID of the specific message that triggered this task.
-        single_message_mode: When True use message id as Redis session_id (isolated message).
         conversation_id: Optional conversation ID. If provided, used directly instead of get_or_create.
 
     Returns:
@@ -182,9 +158,8 @@ async def dispatch_reply(
             "reply_job",
             tenant_name,
             sender_id,
-            agent_config,
+            None,  # agent_config: None = the tenant's AgentDocument
             task_message_id,
-            single_message_mode,
             conversation_id,
             _defer_by=delay if delay > 0 else None,
             _job_id=f"gen:{task_message_id}" if task_message_id else None,
@@ -197,9 +172,8 @@ async def dispatch_reply(
             "reply_job",
             tenant_name,
             sender_id,
-            agent_config,
+            None,  # agent_config: None = the tenant's AgentDocument
             task_message_id,
-            single_message_mode,
             conversation_id,
             _defer_by=delay if delay > 0 else None,
             _job_id=f"gen:{task_message_id}" if task_message_id else None,
@@ -214,9 +188,7 @@ async def dispatch_reply(
     return None
 
 
-async def process_message(
-    platform: str, request_body: any, tenant_name: Optional[str] = None, agent: Optional[dict] = None
-):
+async def process_message(platform: str, request_body: any, tenant_name: Optional[str] = None):
     """Save the inbound message with the platform's handler, then generate the reply: nothing when there is no one to
     answer (outgoing, blocked, manual mode); through ARQ when USE_ARQ_WORKER is set, inline otherwise.
     """
@@ -225,7 +197,6 @@ async def process_message(
     delay = save_response.delay
     tenant_name = save_response.tenant_name
     task_message_id = save_response.task_message_id
-    single_message_mode = save_response.single_message_mode
     conversation_id = save_response.conversation_id
     if not sender_id:
         #  For example is outgoing message or the user is blocked or in agent mode
@@ -237,15 +208,7 @@ async def process_message(
         if tenant and tenant.manual_mode:
             return
 
-    # Parse agent config if provided
-    agent_config = None
-    if agent:
-        try:
-            agent_config = json.loads(agent)
-        except json.JSONDecodeError:
-            logger.error(f"Invalid JSON format for agent: {agent}")
-
-    if getenv("USE_ARQ_WORKER", False):
+    if getenv("USE_ARQ_WORKER", "").lower() == "true":
         # Get ARQ pool (singleton, reused across all requests)
         pool = await arq_pool_manager.get_pool()
 
@@ -257,20 +220,16 @@ async def process_message(
             pool=pool,
             tenant_name=tenant_name,
             sender_id=sender_id,
-            agent_config=agent_config,
             delay=delay,
             should_await=should_await,
             task_message_id=task_message_id,
-            single_message_mode=single_message_mode,
             conversation_id=conversation_id,
         )
     else:
         return await reply_to_message(
             tenant_name,
             sender_id,
-            agent_config=agent_config,
             task_message_id=task_message_id,
-            single_message_mode=single_message_mode,
             conversation_id=conversation_id,
         )
 

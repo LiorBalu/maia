@@ -14,6 +14,7 @@ from maia.api.qa import qa_router
 from maia.api.settings import settings_router
 from maia.api.sheets import sheets_router
 from maia.api.tenants import tenant_router
+from maia.api.tools import tools_router
 
 router = APIRouter()
 
@@ -32,3 +33,4 @@ router.include_router(qa_router)
 router.include_router(settings_router)
 router.include_router(sheets_router)
 router.include_router(tenant_router)
+router.include_router(tools_router)

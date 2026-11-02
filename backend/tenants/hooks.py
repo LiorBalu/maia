@@ -1,10 +1,14 @@
 """
-Tenant hooks: routes each inbound message to the handler of its tenant.
+Tenant hooks: give each inbound message the tools of its tenant, then run the tenant's own handler.
 
-A tenant ``<name>`` is handled by ``tenants/<name with '-' → '_'>/handling.py`` exposing
-``async def handle_<folder>(request)``. The folder name is the only registration; the two
-maps below are kept empty on purpose and exist only for an explicit alias that cannot be
-derived from a folder name.
+Two layers, both optional:
+
+1. ``TenantDocument.tools`` - the tool names chosen on the dashboard (Bot > Tools). Applied to
+   every tenant by ``apply_tenant_tools``; this is how a business opened from the dashboard
+   gets the calendar and sheet tools without any code.
+2. ``tenants/<name with '-' → '_'>/handling.py`` exposing ``async def handle_<folder>(request)``:
+   custom code for one business (its own ``function_tools.py`` tools, per-customer logic). The
+   folder name is the only registration.
 """
 
 import logging
@@ -12,19 +16,35 @@ import importlib
 from pathlib import Path
 
 from maia.pipeline.context import ReplyReady, MessageContext
+from maia.pipeline.tools.function_decorator import FunctionTool
 
 logger = logging.getLogger(__name__)
 
-# tuple-of-tenant-names -> handler (franchises / aliases). Empty: no manual aliasing in use.
-MULTI_TENANT_HANDLERS: dict = {}
 
-# tenant_name -> handler. Empty: every tenant is resolved by folder-name discovery below.
-TENANT_NAME_HANDLERS: dict = {}
+def apply_tenant_tools(request: MessageContext) -> list:
+    """Append the tools stored on the tenant document to ``request["tool_names"]``.
+
+    Only names registered at startup are bound; a stale name (a tool that was removed from the
+    code) is logged and skipped. Returns the names that were added.
+    """
+    tenant = request.get("tenant")
+    configured = list(getattr(tenant, "tools", None) or [])
+    added = []
+    for name in configured:
+        if not FunctionTool.get_function(name):
+            logger.warning("Tool '%s' configured for tenant '%s' is not registered; skipped", name, request.get("tenant_name"))
+            continue
+        if name not in request["tool_names"]:
+            request["tool_names"].append(name)
+            added.append(name)
+    if added:
+        logger.info("Tools from the tenant settings: %s", ", ".join(added))
+    return added
 
 
 async def run_tenant_hooks(request: MessageContext, tenant_name: str) -> None:
     """
-    Route the request to the tenant's handler based on tenant_name.
+    Bind the tenant's configured tools, then route the request to the tenant's handler (if any).
 
     Args:
         request: The MessageContext of the inbound message
@@ -33,17 +53,7 @@ async def run_tenant_hooks(request: MessageContext, tenant_name: str) -> None:
     Returns:
         None: Handlers process the request directly
     """
-
-    # Handle multi-value tenant_name mappings
-    for tenant_names, handler in MULTI_TENANT_HANDLERS.items():
-        if tenant_name in tenant_names:
-            await handler(request)
-            return
-
-    # Handle tenant_name based routing
-    if tenant_name in TENANT_NAME_HANDLERS:
-        await TENANT_NAME_HANDLERS[tenant_name](request)
-        return
+    apply_tenant_tools(request)
 
     # Dynamic handler discovery - search in the tenants folder
     try:
@@ -72,5 +82,6 @@ async def run_tenant_hooks(request: MessageContext, tenant_name: str) -> None:
     except Exception as e:
         logger.error(f"Error during dynamic handler discovery for '{tenant_name}': {e}")
 
-    # Log unhandled cases for debugging
-    logger.warning(f"Warning: No handler found for tenant_name='{tenant_name}'")
+    # No custom code for this tenant: the dashboard tools (if any) are all it gets.
+    if not request["tool_names"]:
+        logger.info("No tools for tenant '%s': the bot answers from the knowledge base only", tenant_name)

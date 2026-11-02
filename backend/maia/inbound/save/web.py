@@ -5,8 +5,6 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from maia.inbound.reply import reply_to_message
-from maia.utils.read_word import read_word_by_pages
 from maia.inbound.save.common import (
     SaveResponse,
     get_or_create_chat_settings,
@@ -46,12 +44,6 @@ async def save_web_input(form, tenant_name) -> SaveResponse:
     if transcoded_audio := handle_audio_message(media_url, message_type, tenant_name):
         body_message = transcoded_audio
     chat_settings = get_or_create_chat_settings(tenant_name)
-    pages = []
-    if (
-        (form.get("MediaContentType0", "") == "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-        or message_type == "docx"
-    ) and customer.meta_data.get("read_text_by_page"):
-        pages = read_word_by_pages(media_url)
 
     media_text = extract_text_from_media(media_url, message_type, form.get("MediaContentType0", ""), chat_settings)
     if media_text:
@@ -77,36 +69,6 @@ async def save_web_input(form, tenant_name) -> SaveResponse:
     )
     msg.save()  # Save the message to database
     update_conversation_profile_name(tenant_name, customer.phone_number, customer.name, msg.conversation_id)
-    if pages:
-        for i, page_text in enumerate(pages, 1):
-            logger.info(f"Page {i}:\n{page_text}\n")
-            # create message for each page and send reply_to_message
-            page_msg = MessageDocument(
-                tenant_name=tenant_name,
-                platform="web",
-                phone_number=customer.phone_number,
-                sender_id=str(customer.id),
-                profile_name=customer.name,
-                message=page_text,
-                role="user",
-                to="bot",
-                msg_type="text",
-                media_url=media_url,
-                sid=str(uuid.uuid4()),
-                message_sids=[],
-                date=datetime.now(timezone.utc),
-                conversation_id=msg.conversation_id,
-                meta_data={"page_number": i, "total_pages": len(pages)},
-            )
-            page_msg = page_msg.save()
-            await reply_to_message(
-                tenant_name=tenant_name,
-                user_id=customer.phone_number,
-                task_message_id=str(page_msg.id),
-                single_message_mode=True,
-                conversation_id=page_msg.conversation_id,
-            )
-        return SaveResponse()
     if not body_message:
         logger.info("Empty message, not processing further")
         try:

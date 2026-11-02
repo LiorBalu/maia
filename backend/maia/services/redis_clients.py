@@ -18,6 +18,13 @@ def get_sync_redis(*, decode_responses: bool = True, **extra):
     return redis.from_url(_redis_url(), decode_responses=decode_responses, **extra)
 
 
+def get_async_redis(*, decode_responses: bool = True, **extra):
+    """Build an asyncio `redis.asyncio.Redis` client (the SSE listener)."""
+    import redis.asyncio as aioredis
+
+    return aioredis.from_url(_redis_url(), decode_responses=decode_responses, **extra)
+
+
 def get_arq_redis_settings(**overrides):
     """arq RedisSettings built from REDIS_URL."""
     from arq.connections import RedisSettings

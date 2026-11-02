@@ -5,7 +5,7 @@ Endpoints:
 
 - ``POST /telephone/{tenant_name}``: Twilio Voice "A call comes in" webhook. ``connect_call_to_stream``
   answers with TwiML that connects the call to the realtime media stream (``maia/voice/media_stream.py``).
-- ``POST /telephone/{tenant_name}/call-status``: Twilio status callback (call stats + ``call_auto_reset`` on_end).
+- ``POST /telephone/{tenant_name}/call-status``: Twilio status callback (``call_auto_reset`` on_end).
 """
 
 import logging
@@ -22,7 +22,7 @@ from maia.voice.normalize_call import normalize_call_data
 from maia.models.messages import MessageDocument
 from maia.utils.conversation.reset import reset_conversation
 
-from maia.pipeline.context import BotInactive, TwimlReady, TenantNotFound, MessageContext
+from maia.pipeline.context import TwimlReady, TenantNotFound, MessageContext
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ async def telephone_inbound(fast_request: Request, tenant_name: str):
             data = form
         args = normalize_call_data(data, tenant_name)
         return await answer_inbound_call(args)
-    except (BotInactive, TenantNotFound):
+    except TenantNotFound:
         return PlainTextResponse("", status_code=200)
     except Exception as e:
         error(f"An error occurred in 'telephone_inbound': {type(e).__name__}: {e}")
@@ -50,7 +50,7 @@ async def telephone_inbound(fast_request: Request, tenant_name: str):
 
 async def answer_inbound_call(args: MessageContext):
     """Save the inbound call as a message, then answer with the TwiML that connects the call to the Realtime stream;
-    manual mode, an inactive bot or missing call settings end the call silently.
+    missing call settings end the call silently.
     """
     logger.info(" ".join(str(part) for part in ("\n", "#" * 100)))
     logger.info(" ".join(str(part) for part in ("tenant_name: ", args["tenant_name"], "platform:", args["platform"])))
@@ -61,19 +61,11 @@ async def answer_inbound_call(args: MessageContext):
         # connect_call_to_stream raises TwimlReady with the TwiML <Connect><Stream> of the
         # OpenAI Realtime media stream.
         await connect_call_to_stream(args)
-        if args["tenant"].manual_mode:
-            logger.info(f"Tenant '{args['tenant_name']}' is in manual mode")
-            raise BotInactive()
-        if not args["tenant"].is_bot_active_for_platform(args["platform"]):
-            logger.info(f"Bot is not active for platform '{args['platform']}' in tenant '{args['tenant_name']}'")
-            raise BotInactive()
         # No call settings for this tenant yet: nothing to connect to, end the call silently.
         logger.warning(f"No call settings for tenant '{args['tenant_name']}': ending call silently")
         return PlainTextResponse(content=str(VoiceResponse()), media_type="application/xml")
     except TwimlReady as twilio_response:
         return PlainTextResponse(str(twilio_response), media_type="application/xml")
-    except BotInactive:
-        return PlainTextResponse("Manual mode")
     except TenantNotFound:
         return PlainTextResponse("Tenant not found", status_code=404)
     except Exception as message:
@@ -106,8 +98,8 @@ def save_inbound_call_message(request):
 
 @router.post("/telephone/{tenant_name}/call-status", response_class=PlainTextResponse)
 async def telephone_status_callback(request: Request, tenant_name: str):
-    """Twilio status callback: log the call, record the call stats on the conversation for terminal statuses, and
-    reset the telephone conversation when a completed call ends (call_auto_reset on_end).
+    """Twilio status callback: log the call and reset the telephone conversation when a completed call ends
+    (call_auto_reset on_end).
     """
     form = await request.form()
 
@@ -124,33 +116,9 @@ async def telephone_status_callback(request: Request, tenant_name: str):
         f"From={form.get('From')} To={form.get('To')}")
     logger.info(f"[call-status] full payload: {dict(form)}")
 
-    from maia.models.settings import CallSettingsDocument
-
-    settings = CallSettingsDocument.objects(tenant_name=tenant_name).first()
-
-    # Resolve the customer's number (the leg that is not our own caller line).
+    # Inbound calls only: the customer is the caller.
     from_number = form.get("From")
     from_number = from_number.replace("+", "") if from_number else None
-    if settings and settings.phone_number == from_number:
-        from_number = form.get("To").replace("+", "") if form.get("To") else None
-
-    # Update per-conversation call stats for every terminal status.
-    ended_statuses = {"completed", "busy", "no-answer", "failed", "canceled"}
-    if call_status in ended_statuses and from_number:
-        try:
-            from maia.utils.calls.call_stats import record_call_finished
-
-            answered = call_status == "completed"
-            record_call_finished(
-                tenant_name=tenant_name,
-                phone_number=from_number,
-                call_status=call_status,
-                duration_seconds=int(call_duration) if (call_duration or "").isdigit() else 0,
-                answered=answered,
-                hung_up_by_customer=False,
-            )
-        except Exception as e:
-            logger.error(f"[call-status] failed to record call stats: {e}")
 
     if call_status != "completed":
         logger.info(f"[call-status] SKIP reset (status={call_status}) — only 'completed' resets the conversation")

@@ -7,7 +7,6 @@ from typing import Any, Dict
 # LangChain 1.0 imports - functions moved to langchain_classic
 from langchain_community.document_loaders import (
     TextLoader,
-    UnstructuredExcelLoader,
     UnstructuredFileLoader,
     UnstructuredPowerPointLoader,
 )
@@ -22,16 +21,18 @@ from maia.knowledge.qdrant import (
     ensure_documents_collection,
     get_qdrant_client,
 )
+from maia.utils.read_csv import read_csv
 from maia.utils.read_pdf import read_pdf
 from maia.utils.read_word import read_word
+from maia.utils.read_xlsx import read_xlsx
 
 logger = logging.getLogger(__name__)
 
 
 def load_document_with_langchain(file_path_or_url: str) -> str:
     """
-    Load document content using Langchain loaders based on file extension or URL type.
-    Supports: PDF, DOCX, DOC, TXT, XLSX, XLS, PPTX, PPT, HTML (web pages), and more.
+    Load document content by file extension or URL type.
+    Supports: PDF, DOCX, TXT, XLSX, XLS, CSV (the dashboard's upload types), PPTX, HTML (web pages), and more.
 
     Args:
         file_path_or_url: Path or URL to the document
@@ -81,10 +82,15 @@ def load_document_with_langchain(file_path_or_url: str) -> str:
         # Choose loader based on file extension
         if file_ext == ".pdf":
             return read_pdf(file_path_or_url)
-        elif file_ext in [".docx", ".doc"]:
+        elif file_ext == ".docx":
             return read_word(file_path_or_url)
+        elif file_ext == ".doc":
+            # python-docx reads only the Office Open XML format; the dashboard no longer offers .doc.
+            raise ValueError("Legacy .doc files are not supported; save the file as .docx")
         elif file_ext in [".xlsx", ".xls"]:
-            loader = UnstructuredExcelLoader(file_path)
+            return read_xlsx(file_path_or_url)
+        elif file_ext == ".csv":
+            return read_csv(file_path_or_url)
         elif file_ext in [".pptx", ".ppt"]:
             loader = UnstructuredPowerPointLoader(file_path)
         elif file_ext in [".txt", ".md"]:
@@ -150,7 +156,6 @@ def create_embedding_parts_for_document(document_id: str):
             "tenant_name": document.tenant_name,
             "title": document.title,
             "categories": doc_categories,
-            "rag_category": doc_categories[0] if doc_categories else "",
         },
     )
 
@@ -159,9 +164,6 @@ def create_embedding_parts_for_document(document_id: str):
     docs = text_splitter.split_documents([langchain_doc])
 
     logger.info(f"Document split into {len(docs)} chunks")
-
-    # Clear existing embedded parts
-    document.embedded_parts = []
 
     # Update document metadata (without parts to avoid size limit)
     document.content = ""  # Clear content to save space
@@ -189,17 +191,6 @@ def create_embedding_parts_for_document(document_id: str):
     logger.info("Now creating Cohere embeddings...")
 
     create_embeddings_for_parts(document_id)
-
-    # Delete file from bucket if protected
-    if document.is_protected is True:
-        from maia.utils.google_cloud_storage.public import delete_file_from_gcs
-
-        try:
-            filename = document.url.split("/")[-1]
-            delete_file_from_gcs(folder=document.tenant_name, filename=filename)
-            logger.info(f" Deleted protected file {filename} from GCS")
-        except Exception as e:
-            logger.error(f" Error deleting file from GCS: {e}")
 
 
 def create_embeddings_for_parts(document_id: str):

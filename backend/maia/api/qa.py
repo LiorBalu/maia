@@ -32,7 +32,6 @@ from maia.models.qa import (
     normalize_qa_category,
 )
 from maia.api.security import verify_token_extended
-from maia.api.qa_backfill import ensure_qa_categories_backfilled
 
 logger = logging.getLogger(__name__)
 
@@ -211,8 +210,6 @@ async def get_qa_list(
         page_size: Number of items per page (default: 50, max: 100)
         is_indexed: Filter by indexing status (optional)
     """
-    ensure_qa_categories_backfilled(tenant_name)
-
     # Build query
     query_filter = {"tenant_name": tenant_name}
     if is_indexed is not None:
@@ -260,8 +257,6 @@ async def get_qa_count(
         tenant_name: Name of the tenant
         is_indexed: Filter by indexing status (optional)
     """
-    ensure_qa_categories_backfilled(tenant_name)
-
     query_filter = {"tenant_name": tenant_name}
     if is_indexed is not None:
         query_filter["is_indexed"] = is_indexed
@@ -293,8 +288,6 @@ async def get_qa_categories(
     Returns:
       [{category, total_count, indexed_count, pending_count}]
     """
-    ensure_qa_categories_backfilled(tenant_name)
-
     coll = QADocument._get_collection()
     pipeline = [
         {"$match": {"tenant_name": tenant_name}},

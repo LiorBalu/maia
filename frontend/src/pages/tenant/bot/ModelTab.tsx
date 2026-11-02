@@ -21,7 +21,7 @@ interface FormState {
 function fromAgent(agent?: Agent): FormState {
   return {
     provider: agent?.provider ?? 'openai',
-    model: agent?.model ?? 'gpt-4.1',
+    model: agent?.model ?? 'gpt-6.1-terra',
     score_threshold: agent?.score_threshold ?? 0.5,
     top_k_general: agent?.top_k_general ?? 10,
     top_k_qa: agent?.top_k_qa ?? 5,

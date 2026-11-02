@@ -72,7 +72,6 @@ class EmbeddedDocumentListResponse(BaseModel):
     is_indexed: bool
     created_at: str
     updated_at: str
-    is_protected: bool = Field(False)
     content: Optional[str] = Field(None)
     categories: list[str] = Field(default_factory=list)
 
@@ -86,11 +85,10 @@ async def get_embedded_documents(tenant_name: str, user: dict = Security(verify_
             id=str(doc.id),
             tenant_name=doc.tenant_name,
             title=doc.title,
-            content=doc.content if not doc.is_protected else "",
+            content=doc.content,
             url=doc.url or "",
             total_parts=doc.total_parts,
             is_indexed=doc.is_indexed,
-            is_protected=getattr(doc, "is_protected", False),
             created_at=doc.created_at.strftime("%Y-%m-%d %H:%M:%S"),
             updated_at=doc.updated_at.strftime("%Y-%m-%d %H:%M:%S"),
             categories=list(doc.categories) if doc.categories else [],
@@ -140,7 +138,7 @@ async def get_embedded_parts(
         EmbeddedPartResponse(
             id=str(part.id),
             part_number=part.part_number,
-            content=part.content if not document.is_protected else "",
+            content=part.content,
             vector_id=part.vector_id,
             vector_for_backup=None,  # Don't send vectors in list view for performance
         )
@@ -153,7 +151,6 @@ async def create_embedded_document(
     tenant_name: str = Form(..., description="Tenant name for the document"),
     file: UploadFile = File(..., description="File to upload (PDF, DOC, DOCX, TXT, XLS, XLSX, CSV)"),
     title: Optional[str] = Form(None, description="Optional title for the document"),
-    is_protected: bool = Form(False, description="Whether the document is protected (default: False)"),
     categories: Optional[str] = Form(None, description="Comma-separated list of categories"),
     user: dict = Security(verify_token_extended, scopes=["staff"]),
 ):
@@ -161,11 +158,10 @@ async def create_embedded_document(
     Upload and create an embedded document.
 
     The file will be uploaded to GCS and then split into parts for embedding.
-    Accepted file types: PDF, DOC, DOCX, TXT, XLS, XLSX, CSV
+    Accepted file types: PDF, DOCX, TXT, XLS, XLSX, CSV
     """
     allowed_types = {
         "application/pdf",
-        "application/msword",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "text/plain",
         "application/vnd.ms-excel",
@@ -173,7 +169,7 @@ async def create_embedded_document(
         "text/csv",
     }
     if file.content_type not in allowed_types:
-        raise HTTPException(status_code=400, detail="Only PDF, DOC, DOCX, TXT, XLS, XLSX, or CSV files are allowed")
+        raise HTTPException(status_code=400, detail="Only PDF, DOCX, TXT, XLS, XLSX, or CSV files are allowed")
     #  add suffix if title does not have file extension
     if title and "." not in title:
         file_extension = file.filename.split(".")[-1]
@@ -195,7 +191,6 @@ async def create_embedded_document(
         url=uploaded_file_url,
         is_indexed=False,
         total_parts=0,
-        is_protected=is_protected,
         categories=categories_list,
     )
     doc.save()
@@ -220,11 +215,10 @@ async def create_embedded_document(
         id=str(doc.id),
         tenant_name=doc.tenant_name,
         title=doc.title,
-        content=doc.content if not doc.is_protected else "",
+        content=doc.content,
         url=doc.url,
         total_parts=doc.total_parts,
         is_indexed=doc.is_indexed,
-        is_protected=doc.is_protected,
         created_at=doc.created_at.strftime("%Y-%m-%d %H:%M:%S"),
         updated_at=doc.updated_at.strftime("%Y-%m-%d %H:%M:%S"),
         categories=list(doc.categories) if doc.categories else [],
@@ -236,7 +230,6 @@ async def scrape_and_create_document(
     tenant_name: str = Form(..., description="Tenant name for the document"),
     url: str = Form(..., description="URL of the website to scrape"),
     title: Optional[str] = Form(None, description="Optional title for the document"),
-    is_protected: bool = Form(False, description="Whether the document is protected (default: False)"),
     categories: Optional[str] = Form(None, description="Comma-separated list of categories"),
     max_depth: int = Form(3, description="Maximum depth for recursive scraping (1=single page, 2=page+links, etc.)"),
     max_pages: int = Form(500, description="Maximum number of pages to scrape (prevents infinite crawling)"),
@@ -271,7 +264,6 @@ async def scrape_and_create_document(
         content="",
         is_indexed=False,
         total_parts=0,
-        is_protected=is_protected,
         categories=categories_list,
     )
     doc.save()
@@ -295,7 +287,6 @@ async def scrape_and_create_document(
         url=doc.url,
         total_parts=0,
         is_indexed=False,
-        is_protected=doc.is_protected,
         created_at=doc.created_at.strftime("%Y-%m-%d %H:%M:%S"),
         updated_at=doc.updated_at.strftime("%Y-%m-%d %H:%M:%S"),
         categories=list(doc.categories) if doc.categories else [],

@@ -17,12 +17,7 @@ import {
   type QAItem,
 } from '@/api/knowledge'
 import { EmptyState, ErrorState } from '@/components/States'
-
-function errorDetail(error: unknown): string {
-  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
-  if (typeof detail === 'string') return detail
-  return (error as Error)?.message || ''
-}
+import { errorDetail } from '@/lib/errors'
 
 export function QATab({ tenant }: { tenant: string }) {
   const { t } = useTranslation()

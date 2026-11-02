@@ -1,12 +1,11 @@
 import { useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, Trash2, X } from 'lucide-react'
+import { Plus, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
-import { createUser, deleteUser } from '@/api/admin'
+import { PASSWORD_RULE, createUser } from '@/api/admin'
 import { listUsers, type ApiUser } from '@/api/auth'
 import { listTenants } from '@/api/tenants'
-import { useAuth } from '@/auth/AuthContext'
 import { RoleBadge } from '@/components/Badges'
 import { Field, InlineError, SaveButton } from '@/components/Form'
 import { PageHeader } from '@/components/PageHeader'
@@ -16,18 +15,9 @@ import { formatDateTime } from '@/lib/format'
 
 export function UsersPage() {
   const { t } = useTranslation()
-  const queryClient = useQueryClient()
-  const { user: me } = useAuth()
   const [creating, setCreating] = useState(false)
-  const [error, setError] = useState<string | null>(null)
   const { data, isLoading, isError, refetch } = useQuery({ queryKey: ['users'], queryFn: listUsers })
   const users = [...(data ?? [])].sort((a, b) => a.email.localeCompare(b.email))
-
-  const remove = useMutation({
-    mutationFn: (email: string) => deleteUser(email),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['users'] }),
-    onError: (e) => setError(t('users.deleteFailed', { reason: errorDetail(e) })),
-  })
 
   return (
     <>
@@ -45,24 +35,13 @@ export function UsersPage() {
         }
       />
       {creating && <CreateUserForm onClose={() => setCreating(false)} />}
-      <div className="mb-3">
-        <InlineError message={error} />
-      </div>
       {isLoading && <SkeletonCards count={3} />}
       {isError && <ErrorState onRetry={() => void refetch()} />}
       {data && users.length === 0 && <EmptyState text={t('users.empty')} />}
       {users.length > 0 && (
         <ul className="card divide-y divide-brand-50">
           {users.map((user) => (
-            <UserRow
-              key={user.email}
-              user={user}
-              isMe={user.email === me?.email}
-              deleting={remove.isPending && remove.variables === user.email}
-              onDelete={() => {
-                if (window.confirm(t('users.deleteConfirm', { email: user.email }))) remove.mutate(user.email)
-              }}
-            />
+            <UserRow key={user.email} user={user} />
           ))}
         </ul>
       )}
@@ -80,7 +59,7 @@ function CreateUserForm({ onClose }: { onClose: () => void }) {
   const [role, setRole] = useState<'user' | 'staff'>('user')
   const [tenant, setTenant] = useState('')
 
-  const passwordOk = /^(?=.*[A-Z])(?=.*[!@#$%^&*(),.?":{}|<>])[A-Za-z\d!@#$%^&*(),.?":{}|<>]{8,}$/.test(password)
+  const passwordOk = PASSWORD_RULE.test(password)
   const valid = name.trim() && email.trim() && passwordOk && (role === 'staff' || tenant)
 
   const create = useMutation({
@@ -157,7 +136,7 @@ function roleOf(user: ApiUser): 'staff' | 'user' {
   return user.is_staff ? 'staff' : 'user'
 }
 
-function UserRow({ user, isMe, deleting, onDelete }: { user: ApiUser; isMe: boolean; deleting: boolean; onDelete: () => void }) {
+function UserRow({ user }: { user: ApiUser }) {
   const { t } = useTranslation()
   const role = roleOf(user)
   const initial = (user.name?.trim() || user.email).charAt(0).toUpperCase()
@@ -191,11 +170,6 @@ function UserRow({ user, isMe, deleting, onDelete }: { user: ApiUser; isMe: bool
       <div className="text-xs text-ink-muted">
         {t('users.lastLogin')}: {lastLogin || t('users.never')}
       </div>
-      {!isMe && (
-        <button type="button" className="btn-ghost p-2 text-red-600 hover:bg-red-50" disabled={deleting} onClick={onDelete} aria-label={t('users.delete')} title={t('users.delete')}>
-          <Trash2 size={15} />
-        </button>
-      )}
     </li>
   )
 }

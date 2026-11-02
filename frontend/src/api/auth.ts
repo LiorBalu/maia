@@ -1,20 +1,12 @@
-import { getDeviceId } from '@/auth/session'
-
 import { api } from './client'
 
 export interface LoginResponse {
   token?: string
-  device_verified?: boolean
   message?: string
 }
 
 export async function login(email: string, password: string): Promise<LoginResponse> {
-  const { data } = await api.post<LoginResponse>('/api/auth/login', {
-    email,
-    password,
-    device_id: getDeviceId(),
-    device_name: navigator.platform || 'browser',
-  })
+  const { data } = await api.post<LoginResponse>('/api/auth/login', { email, password })
   return data
 }
 

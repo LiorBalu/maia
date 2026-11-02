@@ -17,9 +17,6 @@ def filter_conversations(
     conversation_status: Optional[str] = None,
     read_by_manager: Optional[bool] = None,
     last_message_date: Optional[str] = None,
-    assigned_to: Optional[str] = None,
-    resolution_status: Optional[str] = None,
-    agent_required: Optional[bool] = None,
     query: Optional[str] = None,
 ):
     """
@@ -77,15 +74,6 @@ def filter_conversations(
         query_filters &= Q(
             last_message_date__gte=start_of_day, last_message_date__lte=end_of_day
         )
-    if assigned_to:
-        if assigned_to == "unassigned":
-            query_filters &= Q(assigned_to__exists=False) | Q(assigned_to="")
-        else:
-            query_filters &= Q(assigned_to=assigned_to)
-    if resolution_status:
-        query_filters &= Q(resolution_status=resolution_status)
-    if agent_required is not None:
-        query_filters &= Q(agent_required=agent_required)
     return query_filters
 
 

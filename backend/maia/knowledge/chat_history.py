@@ -3,17 +3,6 @@
 
 from typing import Any, Dict, List, Optional
 
-# LangChain 1.0 imports - functions moved to langchain_classic
-
-# Redis client for session management (chat history).
-try:
-    from maia.services.redis_clients import get_sync_redis
-
-    redis_client = get_sync_redis(decode_responses=False)
-except Exception:
-    # Will be handled when actually needed
-    redis_client = None
-
 from maia.knowledge.conversational_rag import ConversationalRAG
 
 

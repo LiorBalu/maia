@@ -29,7 +29,6 @@ export function CustomerDrawer({ open, onClose, conversation, onReplyMode, savin
   const started = parseApiDate(conversation.date)
   const last = parseApiDate(conversation.last_message_date)
   const meetings = customer.meetings ?? []
-  const notes = (customer.notes ?? []).filter((n): n is string => typeof n === 'string')
 
   return (
     <div className="fixed inset-0 z-40">
@@ -111,19 +110,6 @@ export function CustomerDrawer({ open, onClose, conversation, onReplyMode, savin
                     </li>
                   )
                 })}
-              </ul>
-            )}
-          </section>
-
-          <section>
-            <h3 className="label">{t('inbox.customer.notes')}</h3>
-            {notes.length === 0 ? (
-              <p className="text-sm text-ink-muted">{t('inbox.customer.noNotes')}</p>
-            ) : (
-              <ul className="list-disc space-y-1 ps-5 text-sm text-ink-soft">
-                {notes.map((note, index) => (
-                  <li key={index}>{note}</li>
-                ))}
               </ul>
             )}
           </section>

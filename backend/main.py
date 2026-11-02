@@ -2,10 +2,8 @@
 discovery of tools, and the request-logging middleware.
 """
 
-import asyncio
 import logging
 import os
-import signal
 import time
 
 from dotenv import load_dotenv
@@ -43,59 +41,11 @@ httpx_logger = logging.getLogger("httpx")
 httpx_logger.setLevel(logging.WARNING)
 
 
-# Filter out SSL protocol errors from asyncio (these occur during normal SSE client disconnections)
-class SSLErrorFilter(logging.Filter):
-    """Logging filter that drops the SSL noise asyncio logs when an SSE client disconnects."""
-    def filter(self, record):
-        # Filter out SSL protocol errors that occur when clients disconnect
-        """Return False (drop) for the two SSL disconnect messages, True for everything else."""
-        if "Fatal error on SSL protocol" in record.getMessage():
-            return False
-        if "protocol.data_received() failed" in record.getMessage():
-            return False
-        return True
-
-
-# Apply the filter to the asyncio logger
-asyncio_logger = logging.getLogger("asyncio")
-asyncio_logger.addFilter(SSLErrorFilter())
-
-
 app = FastAPI(
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
 )
-
-
-# Signal handler for graceful shutdown
-def signal_handler(sig, frame):
-    """SIGINT / SIGTERM handler: cancel the pending asyncio tasks and exit the process."""
-    logger.info(f"\nSignal {sig}  received. Forced shutdown in progress...")
-    try:
-        # Force cleanup of asyncio tasks
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Cancel all pending tasks
-            pending = asyncio.all_tasks(loop)
-            for task in pending:
-                task.cancel()
-
-            # Wait briefly for cancellation
-            try:
-                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-            except Exception:
-                pass
-    except Exception as e:
-        logger.error(f"Error during signal cleanup: {e}")
-    finally:
-        logger.info("Forced shutdown complete")
-        os._exit(1)
-
-
-# Register signal handlers
-signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
-signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
 
 
 origins = [os.environ.get("FRONTEND_URL", "http://localhost:5173"), "http://127.0.0.1:5173", "*"]
@@ -113,21 +63,6 @@ app.include_router(media_stream_router, prefix="/api", tags=["Call Stream"])
 app.include_router(management_router, prefix="/management/v1")
 app.include_router(sse_router, prefix="/management/v1", tags=["SSE"])
 app.include_router(docs_router, prefix="")
-
-
-# ---------------------------------------------------------------------------
-# Base OpenAPI schema builder (no auth context here — tenant injection is done
-# per-user inside security_docs.py where the request user is available).
-# ---------------------------------------------------------------------------
-def _custom_openapi():
-    """Build the base OpenAPI schema of the app (the tenant enum is injected per request in maia/api/openapi_docs.py).
-    """
-    from fastapi.openapi.utils import get_openapi
-
-    return get_openapi(title=app.title, version=app.version, description=app.description, routes=app.routes)
-
-
-app.openapi = _custom_openapi
 
 
 @app.get("/")
@@ -158,15 +93,13 @@ async def startup_event():
     except Exception as e:
         logger.error(f"Error during tools auto-discovery: {e}")
 
-    # Initialize Redis SSE Manager
-    # This will start the background cleanup task for SSE connections
+    # Subscribe the SSE manager to the Redis broadcast channel (live inbox updates)
     try:
-        from maia.api.sse import start_cleanup_task
+        from maia.api.sse import start_sse_manager
 
-        await start_cleanup_task()
-        logger.info("Redis SSE Manager initialized successfully")
+        await start_sse_manager()
     except Exception as e:
-        logger.error(f"Error initializing Redis SSE Manager: {e}")
+        logger.error(f"Error initializing the SSE manager: {e}")
 
 
 @app.on_event("shutdown")
@@ -174,22 +107,12 @@ async def shutdown_event():
     """Shutdown: stop the SSE manager and close its connections."""
     logger.info("Shutting down application...")
 
-    # Stop Redis SSE Manager and cleanup
     try:
-        from maia.api.sse import stop_cleanup_task
+        from maia.api.sse import stop_sse_manager
 
-        await stop_cleanup_task()
-        logger.info("Redis SSE Manager shutdown complete")
+        await stop_sse_manager()
     except Exception as e:
-        logger.error(f"Error shutting down Redis SSE Manager: {e}")
-
-    # Close the SSE connections
-    try:
-        from maia.api.sse import cleanup_all_connections
-
-        await cleanup_all_connections()
-    except Exception as e:
-        logger.error(f"Error cleaning up SSE connections: {e}")
+        logger.error(f"Error shutting down the SSE manager: {e}")
 
     logger.info("Application shutdown complete")
 

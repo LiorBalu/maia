@@ -1,15 +1,18 @@
 import { api } from './client'
 
-const enc = encodeURIComponent
+/** Same policy as the backend (`maia/api/auth.py` PASSWORD_REGEX): 8+ chars, an uppercase letter, a special character. */
+export const PASSWORD_RULE = /^(?=.*[A-Z])(?=.*[!@#$%^&*(),.?":{}|<>])[A-Za-z\d!@#$%^&*(),.?":{}|<>]{8,}$/
 
 export interface CreateTenantInput {
   name: string
   description: string
   default_language: string
-  default_timezone: string
+  /** The business owner's dashboard login, created together with the tenant (role `user`, member of it). */
+  owner_email: string
+  owner_password: string
 }
 
-/** Creates a tenant; the backend also seeds its prompts, agent and settings. */
+/** Creates a tenant with its owner's login; the backend also seeds its prompts, agent and settings. */
 export async function createTenant(input: CreateTenantInput): Promise<void> {
   await api.post('/management/v1/tenants', { ...input, status: 'active' })
 }
@@ -22,21 +25,15 @@ export interface CreateUserInput {
   tenants: string[]
 }
 
+/** The backend derives `is_staff` from `role` and gives a tenant member full access to its tenants by default. */
 export async function createUser(input: CreateUserInput): Promise<void> {
-  const permissions = Object.fromEntries(input.tenants.map((s) => [s, ['grant_access', 'min_access']]))
   await api.post('/api/auth/register', {
     name: input.name,
     email: input.email,
     password: input.password,
     role: input.role,
-    is_staff: input.role === 'staff',
     tenants_name: input.role === 'staff' ? [] : input.tenants,
-    permissions: input.role === 'staff' ? {} : permissions,
   })
-}
-
-export async function deleteUser(email: string): Promise<void> {
-  await api.delete(`/api/auth/users/${enc(email)}`)
 }
 
 /** Lower-case latin letters, digits and dashes, the way the backend stores tenant names. */

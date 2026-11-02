@@ -16,11 +16,15 @@ from maia.models.settings import CallSettingsDocument
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_REALTIME_MODEL = "gpt-realtime-1.5"
+DEFAULT_REALTIME_MODEL = "gpt-realtime-2.1"
+
+# Server VAD threshold for the whole call: high enough that phone-line noise is not taken for
+# speech and does not cut the greeting.
+VAD_THRESHOLD = 0.8
 
 
 def realtime_model() -> str:
-    """The OpenAI Realtime model phone calls run on: ``MAIA_REALTIME_MODEL``, default ``gpt-realtime-1.5``."""
+    """The OpenAI Realtime model phone calls run on: ``MAIA_REALTIME_MODEL``, default ``gpt-realtime-2.1``."""
     return os.getenv("MAIA_REALTIME_MODEL") or DEFAULT_REALTIME_MODEL
 
 
@@ -30,25 +34,12 @@ async def initialize_session(
     call_settings: CallSettingsDocument,
     tenant_name: str,
     request: MessageContext,
-    is_first_message: bool = True,
 ):
     """Control initial session with OpenAI."""
     try:
         logger.info("Initializing session...")
         await run_tenant_hooks(request, tenant_name)
 
-        if request["additional_context"]:
-            instructions += f"\n\n{request['additional_context']}"
-        if request["customer"].meta_data.get("additional_context"):
-            instructions += f"\n\n{request['customer'].meta_data.get('additional_context')}"
-        if request["extra_prompt_name"]:
-            instructions += PromptDocument.objects(tenant_name=tenant_name, name=request["extra_prompt_name"]).first().prompt
-        if request["customer"].meta_data.get("custom_prompt"):
-            pr = PromptDocument.objects(
-                tenant_name=tenant_name, name=request["customer"].meta_data.get("custom_prompt")
-            ).first()
-            if pr:
-                instructions += pr.prompt
         tz = pytz.timezone("Asia/Jerusalem")
         current_time = datetime.datetime.now(tz).strftime("%H:%M")
         current_date = datetime.datetime.now(tz).strftime("%d/%m/%Y")
@@ -61,17 +52,13 @@ async def initialize_session(
         """
         noise_mode = call_settings.realtime_conf.noise_reduction_mode
 
-        # The first turn uses a higher VAD threshold so line noise does not cut the greeting;
-        # later turns use the configured threshold.
-        threshold = 0.8 if is_first_message else call_settings.realtime_conf.threshold
-
         # GA Realtime session shape: audio settings live under ``audio.input`` / ``audio.output``,
         # Twilio's mu-law is ``audio/pcmu``, and the session has no ``temperature``.
         audio_input = {
             "format": {"type": "audio/pcmu"},
             "turn_detection": {
                 "type": "server_vad",
-                "threshold": threshold,
+                "threshold": VAD_THRESHOLD,
                 "prefix_padding_ms": call_settings.realtime_conf.prefix_padding_ms,
                 "silence_duration_ms": call_settings.realtime_conf.silence_duration_ms,
                 "create_response": True,
@@ -96,22 +83,6 @@ async def initialize_session(
                 },
             },
         }
-        if request["chat_settings"].agent_requested is True:
-            request["tool_schemas"].extend(
-                [
-                    {
-                        "name": "call_to_manager",
-                        "description": "Initiates a call to the manager",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "call_reason": {"type": "string", "description": "The reason for initiating the call"}
-                            },
-                            "required": ["call_reason"],
-                        },
-                    }
-                ]
-            )
 
         # Add hangup call tool for all tenants
         hangup_prompt = PromptDocument.objects(tenant_name=tenant_name, name="hangup_call").first()

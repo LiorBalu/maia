@@ -279,7 +279,6 @@ def handle_connection_status_message(data, tenant_name):
             session_data = data.get("payload", {})
             session_name = session_data.get("name", "")
             status = session_data.get("status", "")
-            status_history = session_data.get("statuses", [])
 
             waha_instance = tenant.get_waha_by_phone_number(session_name.replace("+", ""))
             if waha_instance:
@@ -287,28 +286,6 @@ def handle_connection_status_message(data, tenant_name):
                 waha_instance.is_connected = status == "WORKING"
                 waha_instance.session_status = status
                 waha_instance.last_status_update = datetime.now(timezone.utc)
-
-                # Update status history (keep last 20 entries)
-                # Initialize status_history if it doesn't exist or is None
-                if not hasattr(waha_instance, "status_history") or waha_instance.status_history is None:
-                    waha_instance.status_history = []
-
-                # Add current status to history
-                if status_history:
-                    # Convert timestamp to datetime for each status
-                    for status_item in status_history:
-                        if isinstance(status_item.get("timestamp"), (int, float)):
-                            status_item["timestamp"] = datetime.fromtimestamp(
-                                status_item["timestamp"] / 1000, tz=timezone.utc
-                            )
-                    waha_instance.status_history.extend(status_history)
-                else:
-                    waha_instance.status_history.append(
-                        {"status": status, "timestamp": datetime.now(timezone.utc)}
-                    )
-
-                # Keep only last 20 status changes
-                waha_instance.status_history = waha_instance.status_history[-20:]
 
                 # Update the account in the tenant's list
                 tenant.waha_accounts = [

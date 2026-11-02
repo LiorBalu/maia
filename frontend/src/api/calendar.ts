@@ -74,7 +74,7 @@ export async function getGoogleAuthorizationUrl(tenant: string, scope: GoogleSco
 }
 
 export async function disconnectGoogle(tenant: string, email: string, scope?: GoogleScope): Promise<void> {
-  await api.delete(`/management/v1/calendar/disconnect/${enc(tenant)}/${enc(email)}`, { params: { scope } })
+  await api.delete(`/management/v1/calendar/disconnect/${enc(tenant)}/${enc(email)}`, { params: { scope_type: scope } })
 }
 
 export async function updateGoogleCalendar(

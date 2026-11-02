@@ -83,7 +83,7 @@ def search_in_documents(
             payload = hit.payload or {}
             all_results.append(
                 {
-                    "content": payload.get("page_content", payload.get("content", "")),
+                    "content": payload.get("page_content", ""),
                     "metadata": {
                         "source_type": "document",
                         "document_id": str(payload.get("document_id", "")),

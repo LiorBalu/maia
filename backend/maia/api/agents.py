@@ -122,17 +122,3 @@ async def update_agent(
         created_at=int(agent.created_at.timestamp()),
         updated_at=int(agent.updated_at.timestamp()),
     )
-
-
-@agents_router.delete("/{agent_id}")
-async def delete_agent(
-    agent_id: str,
-    user: dict = Security(verify_token_extended, scopes=["staff"]),
-):
-    """Delete an agent by id."""
-    agent = AgentDocument.objects(id=agent_id).first()
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found.")
-
-    agent.delete()
-    return {"detail": "Agent deleted successfully."}

@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from maia.models.tenants import TenantDocument, WahaAccount
 from maia.models.users import User
 from maia.api.security import authenticate_user_token
-from maia.services.waha import WahaService, pick_waha_server_url
+from maia.services.waha import WahaService
 
 logger = logging.getLogger(__name__)
 
@@ -16,20 +16,17 @@ router = APIRouter(prefix="/waha", tags=["WAHA"])
 
 
 class WahaAccountRequest(BaseModel):
-    """Body of account creation: the WhatsApp number, an optional webhook URL and WAHA worker URL."""
+    """Body of account creation: the WhatsApp number and an optional webhook URL."""
     phone_number: str
     webhook_url: Optional[str] = None
-    server_url: Optional[str] = None  # manual override; omitted = auto-dispatch to the next free worker
 
 
 class WahaAccountResponse(BaseModel):
-    """A WAHA account as the dashboard sees it: number, server, connection status and its history."""
+    """A WAHA account as the dashboard sees it: number and connection status."""
     phone_number: str
     webhook_url: Optional[str] = None
-    server_url: Optional[str] = None
     is_connected: bool = False
     session_status: Optional[str] = "STOPPED"  # Could be "STOPPED", "STARTING", "SCAN_QR_CODE", "WORKING", "FAILED"
-    status_history: Optional[List[dict]] = []
     last_status_update: Optional[str] = None
 
 
@@ -47,10 +44,8 @@ async def get_waha_accounts(tenant_name: str, user: User = Depends(authenticate_
         WahaAccountResponse(
             phone_number=account.phone_number,
             webhook_url=account.webhook_url,
-            server_url=account.server_url,
             is_connected=account.is_connected,
             session_status=(account.session_status if hasattr(account, "session_status") else "STOPPED"),
-            status_history=(account.status_history if hasattr(account, "status_history") else []),
             last_status_update=(
                 account.last_status_update.isoformat()
                 if hasattr(account, "last_status_update") and account.last_status_update
@@ -75,13 +70,8 @@ async def create_waha_account(
         if account.phone_number.replace("+", "") == request.phone_number.replace("+", ""):
             raise HTTPException(status_code=400, detail="Phone number already exists")
 
-    # Assign a WAHA worker: explicit override wins, otherwise dispatch to the next worker with capacity
-    server_url = request.server_url or pick_waha_server_url()
-
     # Create new account
-    new_account = WahaAccount(
-        phone_number=request.phone_number, webhook_url=request.webhook_url, server_url=server_url, is_connected=False
-    )
+    new_account = WahaAccount(phone_number=request.phone_number, webhook_url=request.webhook_url, is_connected=False)
 
     tenant.waha_accounts.append(new_account)
     tenant.save()
@@ -89,10 +79,8 @@ async def create_waha_account(
     return WahaAccountResponse(
         phone_number=new_account.phone_number,
         webhook_url=new_account.webhook_url,
-        server_url=new_account.server_url,
         is_connected=new_account.is_connected,
         session_status="STOPPED",
-        status_history=[],
         last_status_update=None,
     )
 
@@ -140,16 +128,18 @@ async def delete_waha_account(tenant_name: str, phone_number: str, user: User = 
     return {"message": "WAHA account deleted successfully"}
 
 
+# The two calls below may wait several seconds on WAHA (session restart, QR), so they are plain `def`:
+# FastAPI runs them in a worker thread and the event loop keeps serving the WAHA webhooks meanwhile.
 @router.post("/{tenant_name}/accounts/{phone_number}/create-client")
-async def create_whatsapp_client(tenant_name: str, phone_number: str, user: User = Depends(authenticate_user_token)):
-    """Create WhatsApp session in WAHA Pro service"""
+def create_whatsapp_client(tenant_name: str, phone_number: str, user: User = Depends(authenticate_user_token)):
+    """Create the WAHA session of the number with this tenant's webhook (re-pointing an existing one) and start it."""
     service = WahaService(tenant_name, phone_number)
     return service.create_whatsapp_client()
 
 
 @router.get("/{tenant_name}/accounts/{phone_number}/qr")
-async def get_whatsapp_qr(tenant_name: str, phone_number: str, user: User = Depends(authenticate_user_token)):
-    """Get QR code for WhatsApp connection from WAHA Pro"""
+def get_whatsapp_qr(tenant_name: str, phone_number: str, user: User = Depends(authenticate_user_token)):
+    """QR to scan from the phone; (re)starts a missing, STOPPED or FAILED session first. 409 when already connected."""
     service = WahaService(tenant_name, phone_number)
     return service.get_qr_code()
 

@@ -1,7 +1,7 @@
-"""A conversation = one customer on one platform in one tenant; notes, online/offline status, SSE broadcast of updates."""
+"""A conversation = one customer on one platform in one tenant; online/offline status, SSE broadcast of updates."""
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from mongoengine import (
     DO_NOTHING,
@@ -9,15 +9,10 @@ from mongoengine import (
     DateTimeField,
     DictField,
     Document,
-    EmbeddedDocument,
-    EmbeddedDocumentField,
     ListField,
     ReferenceField,
     StringField,
 )
-
-
-from maia.models.tenants import tenant_separates_platforms
 
 logger = logging.getLogger(__name__)
 
@@ -34,21 +29,9 @@ def _get_redis_broadcast_client():
     return _get_redis_broadcast_client._client
 
 
-class Note(EmbeddedDocument):
-    """A manager note attached to a conversation."""
-    title = StringField(required=True)
-    content = StringField(required=True)
-    date = DateTimeField(default=datetime.now(timezone.utc))
-    author = StringField(required=True, default="system")
-
-    def to_dict(self):
-        """Note as a JSON-safe dict."""
-        return {"title": self.title, "content": self.content, "date": self.date.isoformat(), "author": self.author}
-
-
 class Conversation(Document):
-    """The thread of one customer on one platform: status (online / ended), read flag, assignment, resolution, note
-    and meta_data (thread id, call stats, call record).
+    """The thread of one customer on one platform: status (online / ended), read flag and meta_data (thread id,
+    call stats, call record).
     """
     tenant_name = StringField(required=True)
     platform = StringField(required=True, default="waha")
@@ -58,11 +41,6 @@ class Conversation(Document):
     conversation_status = StringField(default="online")
     read_by_manager = BooleanField(default=False)
     last_message_date = DateTimeField()
-    # New field to track resolution status
-    resolution_status = StringField(choices=["unresolved", "in_progress", "resolved"], default="unresolved")
-    assigned_to = StringField(required=False, default=None, description="User assigned to the conversation")
-    agent_required = BooleanField(default=False, description="Indicates if an agent is required for this conversation")
-    note = EmbeddedDocumentField(Note, required=False, default=None)
     profile_name = StringField(required=False, default=None)
     meta_data = DictField(required=False, default=dict)
 
@@ -77,19 +55,7 @@ class Conversation(Document):
     }
 
     def save(self, *args, **kwargs):
-        """Save, arming the human-requested tag for a minute when agent_required flips on, then broadcast the
-        conversation over Redis Pub/Sub for the SSE clients.
-        """
-        is_new = self._created
-        changed_fields = list(self._get_changed_fields())
-
-        # Arm the blinking "human rep needed" tag for 1 minute when a conversation first
-        # flips to agent_required (shown in the inbox).
-        if self.agent_required and ("agent_required" in changed_fields or is_new):
-            until = (datetime.now(timezone.utc) + timedelta(minutes=1)).replace(microsecond=0)
-            self.meta_data = self.meta_data or {}
-            self.meta_data["human_requested_until"] = until.isoformat()
-
+        """Save, then broadcast the conversation over Redis Pub/Sub for the SSE clients."""
         # Save first so the DB has the latest data when SSE clients receive the notification
         result = super(Conversation, self).save(*args, **kwargs)
 
@@ -229,10 +195,6 @@ class Conversation(Document):
             "read_by_manager": self.read_by_manager,
             "last_message_date": self.last_message_date,
             "messages": messages,
-            "resolution_status": self.resolution_status,
-            "assigned_to": self.assigned_to,
-            "note": self.note.to_dict() if self.note else None,
-            "agent_required": self.agent_required,
             "meta_data": serialize_value(self.meta_data),
             "profile_name": profile_name,
         }
@@ -295,13 +257,10 @@ class Conversation(Document):
                 "status": customer.status,
                 "reply_mode": customer.reply_mode,
                 "avatar": customer.avatar,
-                "assigned_to": customer.assigned_to,
-                "agent_requested": customer.agent_requested,
                 "created_date": customer.created_date,
                 "updated_date": customer.updated_date,
                 "meta_data": serialize_value(customer.meta_data),
                 "meetings": meetings,
-                "notes": serialize_value(customer.notes),
             }
 
         # Get base conversation dict (which is already serialized)
@@ -345,6 +304,6 @@ def online_conversation_filter(tenant_name: str, phone_number: str, platform: st
     conversation regardless of platform.
     """
     query = {"tenant_name": tenant_name, "phone_number": phone_number, "conversation_status": "online"}
-    if platform is not None and tenant_separates_platforms(tenant_name):
+    if platform is not None:
         query["platform"] = platform
     return query

@@ -1,4 +1,4 @@
-"""Admin API: conversations and messages of a tenant: inbox lists (infinite scroll), send as manager, end a conversation, hidden numbers."""
+"""Admin API: conversations and messages of a tenant: inbox lists (infinite scroll), send as manager, end a conversation."""
 
 import logging
 from collections import defaultdict
@@ -12,12 +12,12 @@ from pydantic import BaseModel
 
 from maia.services.registry import get_sender_service
 from maia.models.customers import CustomerDocument
-from maia.models.conversations import Conversation, online_conversation_filter
+from maia.models.conversations import Conversation
 from maia.models.messages import MessageDocument
 from maia.models.tenants import TenantDocument
 from maia.models.users import User, UserDocument
 from maia.api.security import authenticate_user_token
-from maia.utils.conversation.reset import reset_conversation, update_conversation_with_call_record
+from maia.utils.conversation.reset import reset_conversation
 from maia.utils.conversations_filters import filter_conversations
 from maia.utils.google_cloud_storage.utils.save_fastapi_file_in_bucket import save_fastapi_file_in_bucket
 
@@ -41,21 +41,12 @@ conversations_router = APIRouter(prefix="/conversations", tags=["Conversations"]
 async def read_conversation(
     tenant_name: str, conversation_id: str, phone_number: str, user: User = Depends(authenticate_user_token)
 ):
-    """Mark a conversation as read by the manager and broadcast the change over SSE."""
+    """Mark a conversation as read by the manager (the save broadcasts the change over SSE)."""
     conversation_doc = Conversation.objects(tenant_name=tenant_name, id=conversation_id).first()
     if not conversation_doc:
         raise HTTPException(status_code=404, detail="Conversation not found")
     conversation_doc.read_by_manager = True
     conversation_doc.save()
-    # Fire-and-forget SSE broadcast - do not block the response
-    try:
-        import asyncio
-
-        from maia.api.sse import broadcast_conversation_status_change
-
-        asyncio.create_task(broadcast_conversation_status_change(conversation_doc))
-    except Exception as e:
-        logger.error(f"Failed to queue SSE broadcast task: {str(e)}")
     return JSONResponse(status_code=200, content={"message": "Conversation updated"})
 
 
@@ -84,7 +75,6 @@ def normalize_phone_number(phone_number: str) -> Optional[str]:
                             "message": {"type": "string"},
                             "reply_to_message_id": {"type": "string"},
                             "conversation_id": {"type": "string"},
-                            "add_to_context": {"type": "string"},
                         },
                     }
                 },
@@ -95,7 +85,6 @@ def normalize_phone_number(phone_number: str) -> Optional[str]:
                             "message": {"type": "string"},
                             "reply_to_message_id": {"type": "string"},
                             "conversation_id": {"type": "string"},
-                            "add_to_context": {"type": "string"},
                             "file": {"type": "string", "format": "binary"},
                         },
                     }
@@ -114,14 +103,13 @@ async def send_message_api(
     platform: str = Query("waha"),
     role: str = Query("manager"),
 ):
-    """Send a message from the dashboard to a customer (JSON, or multipart with a file). Optionally appends text to
-    the customer's additional_context, then send_platform_message sends and saves it.
+    """Send a message from the dashboard to a customer (JSON, or multipart with a file); send_platform_message sends
+    and saves it.
     """
     content_type = (request.headers.get("content-type") or "").lower()
     message: Optional[str] = None
     reply_to_message_id: Optional[str] = None
     conversation_id: Optional[str] = None
-    add_to_context: Optional[str] = None
     file: Optional[UploadFile] = None
 
     if content_type.startswith("application/json"):
@@ -134,13 +122,11 @@ async def send_message_api(
         message = data.get("message")
         reply_to_message_id = data.get("reply_to_message_id")
         conversation_id = data.get("conversation_id")
-        add_to_context = data.get("add_to_context")
     else:
         form = await request.form()
         message = form.get("message")
         reply_to_message_id = form.get("reply_to_message_id")
         conversation_id = form.get("conversation_id")
-        add_to_context = form.get("add_to_context")
         form_file = form.get("file")
         if hasattr(form_file, "filename"):
             file = form_file
@@ -169,18 +155,6 @@ async def send_message_api(
             name=phone_number, phone_number=phone_number, tenant_name=tenant_name, platform=platform
         )
         customer.save()
-    if add_to_context:
-        existing_additional_context = (customer.meta_data or {}).get("additional_context", "")
-        add_to_context = str(add_to_context).strip()
-        if add_to_context and add_to_context not in str(existing_additional_context or ""):
-            customer.meta_data = customer.meta_data or {}
-            customer.meta_data["additional_context"] = (
-                f"{existing_additional_context}\n{add_to_context}".strip()
-                if existing_additional_context
-                else add_to_context
-            )
-            customer._mark_as_changed("meta_data")
-            customer.save()
     await send_platform_message(
         tenant_name=tenant_name,
         phone_number=phone_number,
@@ -373,13 +347,7 @@ async def send_platform_message(
                         logger.info(f"Manager message saved to Redis history for {phone_number}")
         except Exception as _redis_err:
             logger.error(f"Could not save manager message to Redis (non-critical): {_redis_err}")
-        conv = (
-            Conversation.objects(**online_conversation_filter(tenant_name, phone_number, platform)).first()
-            or Conversation.objects(tenant_name=tenant_name, phone_number=phone_number).first()
-        )
-        from maia.api.sse import broadcast_conversation_status_change
-
-        await broadcast_conversation_status_change(conv)
+        # The message save updated and saved the conversation, which broadcast it over SSE.
 
         if message_doc:
             return JSONResponse(status_code=200, content=message_doc.to_json())
@@ -406,26 +374,6 @@ async def end_current_conversation(tenant_name: str, phone_number: str, user: st
     return {"message": "Conversation ended"}
 
 
-# --- Hidden phone numbers cache (per tenant, TTL 60s) ---
-_hidden_phones_cache: Dict[str, Any] = {}
-_HIDDEN_PHONES_TTL = 600  # seconds
-
-
-def _get_hidden_phone_numbers(tenant_name: str) -> List[str]:
-    """Return hidden phone numbers for a tenant, cached for 60 seconds."""
-    import time
-
-    now = time.monotonic()
-    entry = _hidden_phones_cache.get(tenant_name)
-    if entry and (now - entry["ts"]) < _HIDDEN_PHONES_TTL:
-        return entry["phones"]
-
-    hidden_customers = CustomerDocument.objects(tenant_name=tenant_name, meta_data__hidden=True).only("phone_number")
-    phones = [c.phone_number for c in hidden_customers if c.phone_number]
-    _hidden_phones_cache[tenant_name] = {"ts": now, "phones": phones}
-    return phones
-
-
 @conversations_router.get("/{tenant_name}/infinite", response_model=InfiniteScrollResponse)
 async def get_conversations_infinite(
     tenant_name: str,
@@ -443,9 +391,6 @@ async def get_conversations_infinite(
     sort_by: Optional[str] = "last_message_date",
     sort_order: Optional[str] = "desc",
     include_tool_calls: Optional[bool] = False,
-    assigned_to: Optional[str] = None,
-    resolution_status: Optional[str] = None,
-    agent_required: Optional[bool] = None,
     include_customer: bool = True,
     query: Optional[str] = None,
     include_messages: bool = True,
@@ -465,17 +410,8 @@ async def get_conversations_infinite(
         conversation_status,
         read_by_manager,
         last_message_date,
-        assigned_to=assigned_to,
-        resolution_status=resolution_status,
-        agent_required=agent_required,
         query=None,  # We'll handle query separately
     )
-
-    # Exclude conversations from customers with meta_data.hidden = True
-    hidden_phone_numbers = _get_hidden_phone_numbers(tenant_name)
-
-    if hidden_phone_numbers:
-        query_filters &= Q(phone_number__nin=hidden_phone_numbers)
 
     # Define allowed sorting fields
     allowed_sort_fields = ["date", "last_message_date", "phone_number", "conversation_status"]
@@ -565,10 +501,6 @@ async def get_conversations_infinite(
 
     # Convert to list to check length
     conversations_list = list(conversations)
-    # add recording to conversation only when loading full details (with messages)
-    if include_messages:
-        for conv in conversations_list:
-            update_conversation_with_call_record(tenant_name, conv)
     # Check if there are more results
     has_more = len(conversations_list) > max_result
     if has_more:

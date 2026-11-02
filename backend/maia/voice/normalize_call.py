@@ -6,7 +6,7 @@ import uuid
 from maia.pipeline.context import MessageContext, TenantNotFound
 from maia.models.customers import fetch_or_create_customer
 from maia.models.tenants import TenantDocument
-from maia.models.settings import CallSettingsDocument, ChatSettingsDocument
+from maia.models.settings import ChatSettingsDocument
 from maia.utils.conversation.get_or_create import get_or_create_online_conversation
 
 logger = logging.getLogger(__name__)
@@ -25,11 +25,6 @@ def normalize_call_data(data: dict, tenant_name: str) -> MessageContext:
         raise TenantNotFound()
     caller = data["Caller"].replace("+", "")
     called_number = data["Called"].replace("+", "")
-    call_settings = CallSettingsDocument.objects(tenant_name=tenant_name).first()
-    if caller == call_settings.phone_number:
-        # Outbound call placed by the business: the customer is the called side.
-        called_number = caller
-        caller = data["Called"].replace("+", "")
     customer = fetch_or_create_customer(
         number_phone=caller,
         tenant_name=tenant_name,
@@ -56,8 +51,6 @@ def normalize_call_data(data: dict, tenant_name: str) -> MessageContext:
         message_type="text",
         media_url=None,
         media_content_type=None,
-        extra_prompt_name=None,
-        additional_context="",
         meta_data={"call_sid": call_sid},
         tool_names=[],
         tool_schemas=[],

@@ -14,25 +14,6 @@ import { MonthView } from './MonthView'
 import { TimeGridView } from './TimeGridView'
 
 const VIEWS: CalendarViewKind[] = ['day', 'week', 'month']
-const VIEW_STORAGE_KEY = 'maia.calendar.view'
-
-function loadView(): CalendarViewKind {
-  try {
-    const stored = localStorage.getItem(VIEW_STORAGE_KEY)
-    if (stored && (VIEWS as string[]).includes(stored)) return stored as CalendarViewKind
-  } catch {
-    /* storage unavailable */
-  }
-  return 'week'
-}
-
-function storeView(view: CalendarViewKind) {
-  try {
-    localStorage.setItem(VIEW_STORAGE_KEY, view)
-  } catch {
-    /* storage unavailable */
-  }
-}
 
 /** Ticks once a minute, for "today" and the current-time line. */
 function useNow(): Date {
@@ -49,7 +30,7 @@ export function CalendarBoard({ tenant, email }: { tenant: string; email?: strin
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const now = useNow()
-  const [view, setView] = useState<CalendarViewKind>(loadView)
+  const [view, setView] = useState<CalendarViewKind>('week')
   const [anchor, setAnchor] = useState(() => new Date())
   const [dialog, setDialog] = useState<{ event: BoardEvent | null; initial: EventForm } | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -82,10 +63,6 @@ export function CalendarBoard({ tenant, email }: { tenant: string; email?: strin
     onError: (e) => setError(t('calendar.deleteFailed', { reason: errorDetail(e) })),
   })
 
-  const changeView = (next: CalendarViewKind) => {
-    setView(next)
-    storeView(next)
-  }
   const openNew = (day: Date, startMinutes?: number) => {
     setError(null)
     setDialog({ event: null, initial: emptyEvent(day, startMinutes) })
@@ -96,7 +73,7 @@ export function CalendarBoard({ tenant, email }: { tenant: string; email?: strin
   }
   const selectDay = (day: Date) => {
     setAnchor(day)
-    changeView('day')
+    setView('day')
   }
 
   const title = rangeTitle(anchor, view)
@@ -136,7 +113,7 @@ export function CalendarBoard({ tenant, email }: { tenant: string; email?: strin
               key={v}
               type="button"
               className={clsx('rounded-lg px-3 py-1 text-xs font-medium transition-colors', view === v ? 'bg-white text-brand-800 shadow-sm' : 'text-ink-soft hover:text-brand-800')}
-              onClick={() => changeView(v)}
+              onClick={() => setView(v)}
             >
               {t(`calendar.views.${v}`)}
             </button>

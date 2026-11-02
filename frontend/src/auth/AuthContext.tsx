@@ -4,7 +4,7 @@ import { login as apiLogin } from '@/api/auth'
 
 import { clearSession, getToken, parseUser, setToken, type SessionUser } from './session'
 
-export type SignInError = 'failed' | 'device' | 'server'
+export type SignInError = 'failed' | 'server'
 
 interface AuthContextValue {
   user: SessionUser | null
@@ -28,7 +28,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const status = (error as { response?: { status?: number } })?.response?.status
       throw new Error(status ? 'failed' : 'server')
     }
-    if (!response.token) throw new Error(response.device_verified === false ? 'device' : 'failed')
+    if (!response.token) throw new Error('failed')
     const parsed = parseUser(response.token)
     if (!parsed) throw new Error('failed')
     setToken(response.token)

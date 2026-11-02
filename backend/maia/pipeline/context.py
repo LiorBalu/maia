@@ -28,10 +28,6 @@ class ReplyReady(Exception):
     """
 
 
-class BotInactive(Exception):
-    """The tenant is in manual mode, or the bot is switched off for this platform: answer nothing."""
-
-
 class TenantNotFound(Exception):
     """No tenant with that name exists."""
 
@@ -55,10 +51,6 @@ class MessageContext(TypedDict):
     - ``sender_name``: the sender's display name.
     - ``message_text``, ``message_id`` (the platform's id: WAHA message id, Gmail id, uuid for calls).
     - ``message_type`` (text / image / audio...), ``media_url``, ``media_content_type``.
-
-    Prompt building (read by the Realtime session only; the chat RAG uses ``default`` + ``platform_<platform>``):
-    - ``extra_prompt_name``: name of an extra ``PromptDocument`` appended to the instructions.
-    - ``additional_context``: free text appended to the instructions.
 
     Per-message state:
     - ``meta_data``: per-message flags (``request_message``, ``thread_id``,
@@ -84,8 +76,6 @@ class MessageContext(TypedDict):
     message_type: Optional[str]
     media_url: Optional[str]
     media_content_type: Optional[str]
-    extra_prompt_name: Optional[str]
-    additional_context: Optional[str]
     meta_data: dict
     tool_names: list
     tool_schemas: list

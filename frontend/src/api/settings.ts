@@ -3,14 +3,7 @@ import type { TenantSummary } from './tenants'
 
 const enc = encodeURIComponent
 
-// ---------- Tenant (general + Twilio Voice credentials) ----------
-
-/** Twilio Voice account of the business; used only to fetch call recordings. WhatsApp is WAHA. */
-export interface TwilioAccountInput {
-  account_sid: string
-  auth_token: string
-  phone_number: string
-}
+// ---------- Tenant (general) ----------
 
 export interface TenantFeature {
   name: string
@@ -23,16 +16,17 @@ export interface TenantDetail extends TenantSummary {
   access_users?: string[]
   creator_email?: string | null
   phone_numbers?: string[]
+  /** Names of the registered tools the bot may call (Bot > Tools). */
+  tools?: string[]
 }
 
 export interface TenantUpdate {
   description?: string
   default_language?: string
-  default_timezone?: string
   manual_mode?: boolean
   features?: TenantFeature[]
-  twilio_accounts?: TwilioAccountInput[]
   status?: string
+  tools?: string[]
 }
 
 export async function getTenantDetail(tenant: string): Promise<TenantDetail> {
@@ -77,7 +71,6 @@ export async function updateChatSettings(tenant: string, settings: ChatSettings)
 // ---------- Call settings (phone) ----------
 
 export interface RealtimeConf {
-  threshold: number
   prefix_padding_ms: number
   silence_duration_ms: number
   temperature: number
@@ -89,12 +82,10 @@ export interface RealtimeConf {
 export interface CallSettings {
   tenant_name: string
   phone_number: string
-  representative_phone_number: string
   tts_provider: 'realtime'
   gpt_voice: string
   openai_speed: number
   realtime_conf: RealtimeConf
-  features?: SettingsFeature[]
 }
 
 export const GPT_VOICES = ['marin', 'cedar', 'alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse']
@@ -114,7 +105,6 @@ export async function updateCallSettings(tenant: string, settings: CallSettings)
 export interface WahaAccount {
   phone_number: string
   webhook_url?: string | null
-  server_url?: string | null
   is_connected: boolean
   session_status?: string | null
   last_status_update?: string | null

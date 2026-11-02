@@ -29,13 +29,3 @@ def upload_to_gcs(file_obj, folder: str, destination_blob_name: str, content_typ
     # Percent-encode the path: non-ASCII blob names (e.g. Hebrew filenames) otherwise
     # produce URLs that external fetchers such as Twilio reject as invalid media URLs.
     return f"https://storage.googleapis.com/{BUCKET_NAME}/{quote(destination_blob_name)}"
-
-
-def delete_file_from_gcs(folder: str, filename: str) -> None:
-    """Deletes a specific file in a folder"""
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(BUCKET_NAME)
-    blob_name = f"{folder}/{filename}"
-    blob = bucket.blob(blob_name)
-    blob.delete()
-    return None

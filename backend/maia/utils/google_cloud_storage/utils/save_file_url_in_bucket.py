@@ -19,9 +19,9 @@ def save_file_url_in_bucket(tenant_name: str, media_url: str, content_type: str)
 
     media_file = None
     filename = None
-    from maia.services.waha import get_known_waha_base_urls
+    from maia.services.waha import get_waha_base_url
 
-    if any(media_url.startswith(f"{base}/") for base in get_known_waha_base_urls()):
+    if media_url.startswith(f"{get_waha_base_url()}/"):
         response = requests.get(media_url, headers={"X-Api-Key": getenv("WAHA_API_KEY", "")})
     else:
         response = requests.get(media_url)

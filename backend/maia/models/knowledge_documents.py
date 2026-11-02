@@ -57,7 +57,6 @@ class EmbeddedDocument(Document):
     content = StringField()
     url = StringField()
     is_indexed = BooleanField(default=False)
-    is_protected = BooleanField(default=False)
     # When True, this document is an automatically generated RAG memory for a specific WhatsApp group.
     # These docs should NOT be included in the default "document_ids=None => all docs" search.
     is_private = BooleanField(default=False)
@@ -81,5 +80,4 @@ class EmbeddedPartResponse(BaseModel):
     part_number: int
     content: str
     vector_id: Optional[str] = Field(None)
-    is_protected: bool = Field(False)
     vector_for_backup: Optional[list[float]] = Field(None)

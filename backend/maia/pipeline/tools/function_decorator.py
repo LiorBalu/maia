@@ -6,7 +6,6 @@ import json
 import os
 import importlib
 import glob
-from dataclasses import is_dataclass, fields
 from pathlib import Path
 import traceback
 from typing import get_type_hints, get_origin, get_args, Any, Dict, List, Union
@@ -143,95 +142,9 @@ class FunctionTool:
             return {"type": "number"}
         elif param_type is bool:
             return {"type": "boolean"}
-        elif is_dataclass(param_type):
-            # Handle dataclass types by generating schema from their fields
-            return cls._dataclass_to_schema(param_type)
         else:
             # Default to string for unknown types
             return {"type": "string"}
-
-    @classmethod
-    def _dataclass_to_schema(cls, dataclass_type) -> Dict:
-        """Convert a dataclass to JSON schema with all its fields"""
-        schema = {"type": "object", "properties": {}, "required": []}
-
-        # Get type hints for the dataclass
-        type_hints = get_type_hints(dataclass_type)
-
-        for field in fields(dataclass_type):
-            field_name = field.name
-            field_type = type_hints.get(field_name, str)
-
-            # Recursively generate schema for this field
-            field_schema = cls._type_to_schema(field_type)
-
-            # Add field description from docstring if available
-            if dataclass_type.__doc__:
-                field_desc = cls._extract_field_description(dataclass_type.__doc__, field_name)
-                if field_desc:
-                    field_schema["description"] = field_desc
-
-            schema["properties"][field_name] = field_schema
-
-            # Add to required if field has no default value
-            if field.default == field.default_factory == field.default_factory:  # MISSING
-                # Check if field has no default
-                if field.default is field.default_factory:
-                    from dataclasses import MISSING
-
-                    if field.default is MISSING:
-                        schema["required"].append(field_name)
-
-        return schema
-
-    @classmethod
-    def _extract_field_description(cls, docstring: str, field_name: str) -> str:
-        """Extract field description from dataclass docstring"""
-        lines = docstring.split("\n")
-        for line in lines:
-            line = line.strip()
-            if line.startswith(f"{field_name}:"):
-                return line.split(":", 1)[1].strip()
-        return ""
-
-    @classmethod
-    def _convert_argument(cls, param_type, param_value):
-        """Convert argument value to the correct type (handles dataclasses)"""
-        origin = get_origin(param_type)
-
-        # Handle List types
-        if origin is list:
-            args = get_args(param_type)
-            if args and isinstance(param_value, list):
-                item_type = args[0]
-                return [cls._convert_argument(item_type, item) for item in param_value]
-            return param_value
-
-        # Handle Optional types
-        if origin is Union:
-            args = get_args(param_type)
-            if len(args) == 2 and type(None) in args:
-                non_none_type = args[0] if args[1] is type(None) else args[1]
-                if param_value is None:
-                    return None
-                return cls._convert_argument(non_none_type, param_value)
-
-        # Handle dataclass types
-        if is_dataclass(param_type) and isinstance(param_value, dict):
-            # Convert nested dataclass fields recursively
-            type_hints = get_type_hints(param_type)
-            converted_fields = {}
-
-            for field in fields(param_type):
-                field_name = field.name
-                if field_name in param_value:
-                    field_type = type_hints.get(field_name, str)
-                    converted_fields[field_name] = cls._convert_argument(field_type, param_value[field_name])
-
-            return param_type(**converted_fields)
-
-        # Return as is for primitive types
-        return param_value
 
     @classmethod
     def _extract_param_description(cls, docstring: str, param_name: str) -> str:
@@ -363,18 +276,11 @@ async def call_function_tool(function_name: str, arguments: Dict, request=None) 
         return f"Function {function_name} not found"
 
     try:
-        # Get function signature and type hints
+        # Get function signature
         sig = inspect.signature(func)
-        type_hints = get_type_hints(func)
 
-        # Convert arguments to proper types (including dataclasses)
-        converted_arguments = {}
-        for param_name, param_value in arguments.items():
-            if param_name in type_hints:
-                param_type = type_hints[param_name]
-                converted_arguments[param_name] = FunctionTool._convert_argument(param_type, param_value)
-            else:
-                converted_arguments[param_name] = param_value
+        # The model's arguments are passed as they arrive (JSON types: str, int, float, bool, list, dict)
+        converted_arguments = dict(arguments)
 
         # Check if function expects 'request' parameter
         if "request" in sig.parameters and request is not None:

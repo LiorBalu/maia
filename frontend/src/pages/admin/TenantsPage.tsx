@@ -1,12 +1,12 @@
-import { useMemo, useState, type FormEvent } from 'react'
+import { useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Plus, Search, X } from 'lucide-react'
+import { ArrowLeft, Plus, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Link, useNavigate } from 'react-router-dom'
 
-import { createTenant, toTenantSlug } from '@/api/admin'
+import { PASSWORD_RULE, createTenant, toTenantSlug } from '@/api/admin'
 import { listTenants, tenantChannels, type TenantSummary } from '@/api/tenants'
-import { ChannelBadge, StatusBadge } from '@/components/Badges'
+import { ChannelBadge } from '@/components/Badges'
 import { Field, InlineError, SaveButton } from '@/components/Form'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState, ErrorState, SkeletonCards } from '@/components/States'
@@ -14,18 +14,9 @@ import { errorDetail } from '@/lib/errors'
 
 export function TenantsPage() {
   const { t } = useTranslation()
-  const [query, setQuery] = useState('')
   const [creating, setCreating] = useState(false)
   const { data, isLoading, isError, refetch } = useQuery({ queryKey: ['tenants'], queryFn: listTenants })
-
-  const tenants = useMemo(() => {
-    const sorted = [...(data ?? [])].sort((a, b) => a.name.localeCompare(b.name))
-    const needle = query.trim().toLowerCase()
-    if (!needle) return sorted
-    return sorted.filter(
-      (s) => s.name.toLowerCase().includes(needle) || (s.description ?? '').toLowerCase().includes(needle),
-    )
-  }, [data, query])
+  const tenants = [...(data ?? [])].sort((a, b) => a.name.localeCompare(b.name))
 
   return (
     <>
@@ -44,17 +35,6 @@ export function TenantsPage() {
       />
 
       {creating && <CreateTenantForm onClose={() => setCreating(false)} />}
-
-      <div className="relative mb-5 max-w-sm">
-        <Search size={16} className="pointer-events-none absolute inset-y-0 start-3 my-auto text-ink-muted" />
-        <input
-          type="search"
-          className="input ps-9"
-          placeholder={t('tenants.search')}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
-      </div>
 
       {isLoading && <SkeletonCards />}
       {isError && <ErrorState onRetry={() => void refetch()} />}
@@ -78,13 +58,23 @@ function CreateTenantForm({ onClose }: { onClose: () => void }) {
   const [slug, setSlug] = useState('')
   const [slugTouched, setSlugTouched] = useState(false)
   const [language, setLanguage] = useState('he')
-  const [timezone, setTimezone] = useState('Asia/Jerusalem')
+  const [ownerEmail, setOwnerEmail] = useState('')
+  const [ownerPassword, setOwnerPassword] = useState('')
 
   const effectiveSlug = slugTouched ? toTenantSlug(slug) : toTenantSlug(display)
+  const valid = Boolean(effectiveSlug && display.trim() && ownerEmail.trim() && PASSWORD_RULE.test(ownerPassword))
   const create = useMutation({
-    mutationFn: () => createTenant({ name: effectiveSlug, description: display.trim(), default_language: language, default_timezone: timezone }),
+    mutationFn: () =>
+      createTenant({
+        name: effectiveSlug,
+        description: display.trim(),
+        default_language: language,
+        owner_email: ownerEmail.trim().toLowerCase(),
+        owner_password: ownerPassword,
+      }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['tenants'] })
+      void queryClient.invalidateQueries({ queryKey: ['users'] })
       onClose()
       navigate(`/s/${encodeURIComponent(effectiveSlug)}/settings`)
     },
@@ -92,8 +82,7 @@ function CreateTenantForm({ onClose }: { onClose: () => void }) {
 
   function submit(e: FormEvent) {
     e.preventDefault()
-    if (!effectiveSlug || !display.trim()) return
-    create.mutate()
+    if (valid) create.mutate()
   }
 
   return (
@@ -133,8 +122,28 @@ function CreateTenantForm({ onClose }: { onClose: () => void }) {
             ))}
           </select>
         </Field>
-        <Field label={t('common.timezone')}>
-          <input className="input text-left" dir="ltr" value={timezone} onChange={(e) => setTimezone(e.target.value)} />
+        <Field label={t('tenants.create.ownerEmail')} help={t('tenants.create.ownerEmailHelp')}>
+          <input
+            type="email"
+            className="input text-left"
+            dir="ltr"
+            value={ownerEmail}
+            onChange={(e) => setOwnerEmail(e.target.value)}
+            placeholder="owner@example.com"
+            required
+            autoComplete="off"
+          />
+        </Field>
+        <Field label={t('tenants.create.ownerPassword')} help={t('users.create.passwordHelp')}>
+          <input
+            type="text"
+            className="input text-left"
+            dir="ltr"
+            value={ownerPassword}
+            onChange={(e) => setOwnerPassword(e.target.value)}
+            required
+            autoComplete="off"
+          />
         </Field>
       </div>
       <div className="flex items-center justify-between gap-3">
@@ -143,7 +152,7 @@ function CreateTenantForm({ onClose }: { onClose: () => void }) {
           <button type="button" className="btn-ghost" onClick={onClose}>
             {t('knowledge.qa.cancel')}
           </button>
-          <SaveButton saving={create.isPending} disabled={!effectiveSlug || !display.trim()} label={t('tenants.create.submit')} />
+          <SaveButton saving={create.isPending} disabled={!valid} label={t('tenants.create.submit')} />
         </div>
       </div>
     </form>
@@ -158,16 +167,13 @@ function TenantCard({ tenant }: { tenant: TenantSummary }) {
       to={`/s/${encodeURIComponent(tenant.name)}/inbox`}
       className="card group flex flex-col gap-3 p-5 transition hover:-translate-y-0.5 hover:shadow-pop"
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="truncate text-base font-semibold text-ink" dir="auto">
-            {tenant.description || tenant.name}
-          </div>
-          <div className="mt-0.5 truncate text-xs text-ink-muted" dir="ltr">
-            {tenant.name}
-          </div>
+      <div className="min-w-0">
+        <div className="truncate text-base font-semibold text-ink" dir="auto">
+          {tenant.description || tenant.name}
         </div>
-        <StatusBadge status={tenant.status} />
+        <div className="mt-0.5 truncate text-xs text-ink-muted" dir="ltr">
+          {tenant.name}
+        </div>
       </div>
       <div className="flex flex-wrap gap-1.5">
         {channels.length > 0 ? (
@@ -177,7 +183,7 @@ function TenantCard({ tenant }: { tenant: TenantSummary }) {
         )}
       </div>
       <div className="mt-auto flex items-center justify-between pt-1 text-xs text-ink-muted">
-        <span dir="ltr">{[tenant.default_language?.toUpperCase(), tenant.default_timezone].filter(Boolean).join(' · ')}</span>
+        <span dir="ltr">{tenant.default_language?.toUpperCase()}</span>
         <span className="btn-soft px-3 py-1 group-hover:bg-brand-200">
           {t('common.enter')}
           <ArrowLeft size={14} />

@@ -11,7 +11,7 @@ from maia.inbound.save.common import ensure_thread_id_in_conversation, retrieve_
 from maia.services.registry import get_sender_service
 from maia.models.agents import AgentDocument
 from maia.models.customers import fetch_or_create_customer
-from maia.models.conversations import Conversation
+from maia.models.conversations import Conversation, online_conversation_filter
 from maia.models.messages import MessageDocument
 from maia.models.tenants import TenantDocument
 from maia.models.settings import ChatSettingsDocument
@@ -21,6 +21,9 @@ from maia.utils.split_message_by_sentences import split_message_by_sentences
 
 logger = logging.getLogger(__name__)
 
+# Longest text sent as one message; longer answers are split on sentence boundaries.
+MAX_MESSAGE_LENGTH = 10000
+
 
 @contextual_task
 async def reply_to_message(
@@ -28,54 +31,34 @@ async def reply_to_message(
     user_id: str,
     agent_config: dict = None,
     task_message_id: str = None,
-    single_message_mode: bool = False,
     conversation_id: str = None,
 ) -> str:
     """Generate and send the bot's reply for a saved message (the heart of the pipeline).
 
     Order: cooldown guard (in a burst only the last task answers), customer + MessageContext,
-    tenant hook (tools), RAG generation, then the send phase inside ``except ReplyReady``:
-    guards, split on ``---`` and by length, send through the platform service, save the AI
-    message. Returns a short status text, or the JSON {message, tool_call} for the web channel.
+    generation (``_generate_answer``: tenant hook, RAG; a ``ReplyReady`` raised by a hook or a tool
+    short-circuits it with a fixed text), then the send phase: guards, web = save only, other
+    platforms = ``_send_answer``. Returns a short status text, or the JSON {message, tool_call}.
     """
     tenant = TenantDocument.objects(name=tenant_name).first()
-
-    # single_message_mode: True when a specific message_id is passed (web page-by-page).
-    # In this mode the LangChain session_id is the message id itself instead of the
-    # conversation id, so each page/call gets its own isolated Redis history.
     chat_settings = ChatSettingsDocument.objects(tenant_name=tenant_name).first()
     if not chat_settings:
         chat_settings = ChatSettingsDocument(tenant_name=tenant_name)
 
-    custom_prompt = None
-
-    if not single_message_mode:
-        # Fetch the last message from the user
-        last_messages = get_conversation_messages(tenant_name, user_id, conversation_id)
-        last_user_message = last_messages[-1] if last_messages else None
-    else:
-        last_messages = []
-        last_user_message = MessageDocument.objects(id=task_message_id).first()
+    last_messages = get_conversation_messages(tenant_name, user_id, conversation_id)
+    last_user_message = last_messages[-1] if last_messages else None
     if not last_user_message:
         logger.warning("Message not found for task_message_id=%s", task_message_id)
         return "Message not found"
-    # Determine which specific message triggered this task.
-    # In burst scenarios (e.g. 3 messages in 1 s with a 10 s delay) last_user_message is always
-    # the most recent one, but task_message_id points to the exact message that triggered *this* task.
-    task_message = MessageDocument.objects(id=task_message_id).first() if task_message_id else None
-    if task_message is None:
-        task_message = last_user_message
 
-    if (
-        last_user_message.date + timedelta(seconds=retrieve_human_delay_setting(chat_settings)) > datetime.utcnow()
-        and last_user_message.platform not in ["web", "email"]
-        and not single_message_mode
-    ):
-        _try_save_task_message_to_redis(tenant, tenant_name, user_id, task_message, conversation_id)
+    if _in_cooldown(last_user_message, chat_settings):
+        # In a burst (e.g. 3 messages in 1 s with a 10 s delay) last_user_message is always the most
+        # recent one, but task_message_id points to the exact message that triggered *this* task.
+        task_message = MessageDocument.objects(id=task_message_id).first() if task_message_id else None
+        _try_save_task_message_to_redis(tenant, tenant_name, user_id, task_message or last_user_message, conversation_id)
         logger.info("⏳ Message still in cooldown period, skipping AI response")
         return "Message is still in the cooldown period"
 
-    # Fetch or create the customer
     customer = fetch_or_create_customer(
         number_phone=user_id,
         tenant_name=tenant_name,
@@ -87,163 +70,150 @@ async def reply_to_message(
         user_id,
         tenant,
         chat_settings,
-        custom_prompt,
         last_user_message,
         customer,
         conversation_id=conversation_id,
     )
-
-    # Pretty formatted logging for debug purposes
     log_user_response_details(last_user_message, label="💬 USER MESSAGE CONTENT:")
-    ai_message_raw = ""
-    ai_message = None
+
+    session_id = _resolve_session_id(tenant_name, user_id, last_user_message, conversation_id)
     try:
-
-        await run_tenant_hooks(args, args["tenant_name"])
-
-        # Generation: LangChain + Cohere RAG.
-        from maia.knowledge.conversational_rag import chat_with_documents
-
-        if agent_config is None:
-            agent_doc = AgentDocument.objects(tenant_name=tenant_name, is_active=True).first()
-            if agent_doc:
-                agent_config = agent_doc.agent_config
-
-        # Determine the Redis session_id:
-        # - single_message_mode (message_id kwarg set): use the message id directly so
-        #   each isolated page/call has its own fresh history in Redis.
-        # - normal mode: use the online Conversation id (shared history for the user).
-        if single_message_mode:
-            session_id = str(last_user_message.id)
-            logger.info(f"Single message mode: using message_id as session_id ({session_id})")
-        else:
-            if conversation_id:
-                session_id = conversation_id
-            else:
-                from maia.models.conversations import online_conversation_filter
-
-                conversation_doc = Conversation.objects(
-                    **online_conversation_filter(tenant_name, user_id, last_user_message.platform)
-                ).first()
-                session_id = str(conversation_doc.id)
-
-        # Collect media from the current message only
-        media = None
-        if last_user_message.media_url and last_user_message.msg_type in ["image", "audio"]:
-            # Convert media to LangChain format
-            media_item = convert_media_to_langchain_format(
-                url=last_user_message.media_url, media_type=last_user_message.msg_type
-            )
-
-            if media_item:
-                media = [media_item]
-                media_icon = "📸" if last_user_message.msg_type == "image" else "🎵"
-                logger.info("%s %s converted to base64", media_icon, last_user_message.msg_type.capitalize())
-            else:
-                logger.warning("⚠️ Failed to convert %s", last_user_message.msg_type)
-        message_str = last_user_message.message
-        qa_metadata_filter = customer.get_meta_data_field("qa_metadata_filter", None)
-        rag_categories = customer.get_meta_data_field("rag_categories", None)
-
-        res = await chat_with_documents(
-            tenant_name=args["tenant_name"],
-            message=message_str,
-            session_id=session_id,
-            agent_config=agent_config,
-            decorated_function_tools=args["tool_names"],
-            request=args,
-            media=media,
-            qa_metadata_filter=qa_metadata_filter,
-            qa_categories=rag_categories,
-            document_categories=rag_categories,
-        )
-        if res.get("answer"):
-            last_user_message.meta_data["sources"] = res.get("sources", [])
-            last_user_message.meta_data["reformulated_question"] = res.get("reformulated_question", "")
-            last_user_message.meta_data["error_details"] = res.get("error_details", "")
-            last_user_message.meta_data["usage"] = res.get("usage", {})
-            last_user_message.save()
-            raise ReplyReady(res["answer"])
-        # No answer (RAG error): nothing is sent to the user; details stay on the message for debugging.
-        last_user_message.meta_data["error_details"] = res.get("error_details", "")
-        last_user_message.save()
-        logger.warning("⚠️ RAG returned no answer for tenant=%s (error_details=%s)", tenant_name, res.get("error_details"))
-        raise ReplyReady("")
+        answer = await _generate_answer(args, last_user_message, agent_config, session_id)
     except ReplyReady as e:
-        ai_message_raw = str(e)
-        meta_data = {}
-        if not ai_message_raw.strip():
-            logger.warning("⚠️ AI returned empty response, not sending to user")
-            return "No response generated"
-        if has_new_user_message_before_response(
-            last_user_message, chat_settings
-        ) and not have_tool_message_after_last_user_message(last_user_message):
-            logger.info("⏭️ New user message received before AI response was sent. Skipping AI response.")
-            return "New user message detected - no response generated"
-        if args["platform"] == "web":
-            save_AI_message(args, ai_message_raw, meta_data=meta_data)
-            logger.info("💬 AI response saved for platform=%s (no WhatsApp send needed)", args["platform"])
-            return json.dumps(
-                {"message": ai_message_raw, "tool_call": args.get("tool_calls_log", [])}, ensure_ascii=False
-            )
+        answer = str(e)
 
-        sender_service = get_sender_service(
-            tenant_name=args["tenant_name"], service_name="sender_service", platform=args["platform"], to=args["recipient_id"]
+    if not answer.strip():
+        logger.warning("⚠️ AI returned empty response, not sending to user")
+        return "No response generated"
+    if has_new_user_message_before_response(
+        last_user_message, chat_settings
+    ) and not have_tool_message_after_last_user_message(last_user_message):
+        logger.info("⏭️ New user message received before AI response was sent. Skipping AI response.")
+        return "New user message detected - no response generated"
+    if args["platform"] == "web":
+        save_AI_message(args, answer)
+        logger.info("💬 AI response saved for platform=%s (no WhatsApp send needed)", args["platform"])
+        return _web_result(args, answer)
+
+    _send_answer(args, answer)
+    return _web_result(args, answer)
+
+
+def _in_cooldown(last_user_message: MessageDocument, chat_settings: ChatSettingsDocument) -> bool:
+    """True while the human-like delay since the last user message has not elapsed (chat platforms only)."""
+    if last_user_message.platform in ["web", "email"]:
+        return False
+    delay = timedelta(seconds=retrieve_human_delay_setting(chat_settings))
+    return last_user_message.date + delay > datetime.utcnow()
+
+
+def _resolve_session_id(tenant_name: str, user_id: str, last_user_message: MessageDocument, conversation_id: str = None) -> str:
+    """The Redis history key: the online conversation id (shared history for the user)."""
+    if conversation_id:
+        return conversation_id
+    conversation_doc = Conversation.objects(
+        **online_conversation_filter(tenant_name, user_id, last_user_message.platform)
+    ).first()
+    return str(conversation_doc.id)
+
+
+def _message_media(message: MessageDocument) -> list | None:
+    """The message's image/audio as a one-item LangChain media list, or None (no media / conversion failed)."""
+    if not (message.media_url and message.msg_type in ["image", "audio"]):
+        return None
+    media_item = convert_media_to_langchain_format(url=message.media_url, media_type=message.msg_type)
+    if not media_item:
+        logger.warning("⚠️ Failed to convert %s", message.msg_type)
+        return None
+    media_icon = "📸" if message.msg_type == "image" else "🎵"
+    logger.info("%s %s converted to base64", media_icon, message.msg_type.capitalize())
+    return [media_item]
+
+
+async def _generate_answer(args: MessageContext, last_user_message: MessageDocument, agent_config: dict, session_id: str) -> str:
+    """Run the tenant hook (binds the tools) and the RAG; return the answer text ("" when the RAG failed).
+
+    The RAG's sources / reformulated question / error details are stored on the user message for debugging.
+    """
+    await run_tenant_hooks(args, args["tenant_name"])
+
+    # Generation: LangChain + Cohere RAG (imported lazily: heavy LangChain modules).
+    from maia.knowledge.conversational_rag import chat_with_documents
+
+    if agent_config is None:
+        agent_doc = AgentDocument.objects(tenant_name=args["tenant_name"], is_active=True).first()
+        if agent_doc:
+            agent_config = agent_doc.agent_config
+
+    res = await chat_with_documents(
+        tenant_name=args["tenant_name"],
+        message=last_user_message.message,
+        session_id=session_id,
+        agent_config=agent_config,
+        decorated_function_tools=args["tool_names"],
+        request=args,
+        media=_message_media(last_user_message),
+    )
+    answer = res.get("answer") or ""
+    if answer:
+        last_user_message.meta_data["sources"] = res.get("sources", [])
+        last_user_message.meta_data["reformulated_question"] = res.get("reformulated_question", "")
+    else:
+        # No answer (RAG error): nothing is sent to the user; details stay on the message for debugging.
+        logger.warning(
+            "⚠️ RAG returned no answer for tenant=%s (error_details=%s)", args["tenant_name"], res.get("error_details")
         )
+    last_user_message.meta_data["error_details"] = res.get("error_details", "")
+    last_user_message.save()
+    return answer
 
-        if ai_message_raw and ai_message_raw.strip() != "":
-            # split message by max length
-            max_length = 10000
 
-            # split message by "---"
-            if "---" in ai_message_raw:
-                messages = ai_message_raw.split("---")
-            else:
-                messages = [ai_message_raw]
-            for message_str in messages:
-                messages_truncate = split_message_by_sentences(message_str, max_length)
-                should_reply = args["meta_data"].get(
-                    "should_reply_after_process",
-                    args["customer"].get_meta_data_field("should_reply_after_process", True),
-                )
-                if should_reply:
-                    for message_truncate in messages_truncate:
-                        res = sender_service.send_whatsapp_message(
-                            phone_number=args["sender_id"],
-                            message=message_truncate,
-                            thread_id=args["meta_data"].get("thread_id"),
-                            message_id=args["meta_data"].get("email_message_id", args["message_id"]),
-                            subject=args["meta_data"].get("subject", ""),
-                        )
+def _send_answer(args: MessageContext, answer: str) -> None:
+    """Send the answer through the platform service and save each sent part as an AI message.
 
-                        # Persist thread_id returned by the send service into
-                        # the AI message meta_data and on the conversation, so
-                        # that both outbound follow-ups and inbound replies stay
-                        # in the same thread.
-                        sent_meta = dict(meta_data)
-                        returned_thread_id = res.get("thread_id")
-                        if returned_thread_id:
-                            sent_meta["thread_id"] = returned_thread_id
-                            sent_meta.setdefault("subject", args["meta_data"].get("subject", ""))
-                            args["meta_data"].setdefault("thread_id", returned_thread_id)
-                            ensure_thread_id_in_conversation(str(args["conversation"].id), returned_thread_id)
+    ``---`` in the answer separates messages; each is split again on sentence boundaries at
+    MAX_MESSAGE_LENGTH. The thread id returned by the service (email) is kept on the AI message
+    and on the conversation, so follow-ups and replies stay in the same thread.
+    """
+    if not args["meta_data"].get("should_reply_after_process", True):
+        logger.info("🛑 should_reply_after_process=False, AI response generated but NOT sent to user")
+        return
 
-                        ai_message = save_AI_message(
-                            args,
-                            str(message_truncate),
-                            sid=res["sid"],
-                            fake_sid=args.get("fake_sid"),
-                            meta_data=sent_meta,
-                        )
-                        logger.info(
-                            "✅ AI message sent via %s to %s (sid=%s)", args["platform"], args["sender_id"], res.get("sid")
-                        )
-                else:
-                    logger.info("🛑 should_reply_after_process=False, AI response generated but NOT sent to user")
-        if ai_message:
-            log_user_response_details(ai_message, label="🤖 AI MESSAGE CONTENT:")
+    sender_service = get_sender_service(
+        tenant_name=args["tenant_name"], service_name="sender_service", platform=args["platform"], to=args["recipient_id"]
+    )
+    ai_message = None
+    for message_str in answer.split("---"):
+        for message_truncate in split_message_by_sentences(message_str, MAX_MESSAGE_LENGTH):
+            res = sender_service.send_whatsapp_message(
+                phone_number=args["sender_id"],
+                message=message_truncate,
+                thread_id=args["meta_data"].get("thread_id"),
+                message_id=args["meta_data"].get("email_message_id", args["message_id"]),
+                subject=args["meta_data"].get("subject", ""),
+            )
+            sent_meta = {}
+            returned_thread_id = res.get("thread_id")
+            if returned_thread_id:
+                sent_meta["thread_id"] = returned_thread_id
+                sent_meta["subject"] = args["meta_data"].get("subject", "")
+                args["meta_data"].setdefault("thread_id", returned_thread_id)
+                ensure_thread_id_in_conversation(str(args["conversation"].id), returned_thread_id)
+            ai_message = save_AI_message(
+                args,
+                str(message_truncate),
+                sid=res["sid"],
+                fake_sid=args.get("fake_sid"),
+                meta_data=sent_meta,
+            )
+            logger.info("✅ AI message sent via %s to %s (sid=%s)", args["platform"], args["sender_id"], res.get("sid"))
+    if ai_message:
+        log_user_response_details(ai_message, label="🤖 AI MESSAGE CONTENT:")
 
-    return json.dumps({"message": ai_message_raw, "tool_call": args.get("tool_calls_log", [])}, ensure_ascii=False)
+
+def _web_result(args: MessageContext, answer: str) -> str:
+    """The JSON the web channel returns to the browser: the answer and the tool calls made for it."""
+    return json.dumps({"message": answer, "tool_call": args.get("tool_calls_log", [])}, ensure_ascii=False)
 
 
 def _try_save_task_message_to_redis(
@@ -263,7 +233,6 @@ def _try_save_task_message_to_redis(
         if task_message.meta_data.get("langchain_synced"):
             return
         from maia.knowledge.chat_history import add_message_to_history
-        from maia.utils.conversation.get_or_create import get_or_create_online_conversation
 
         if conversation_id:
             session_id = conversation_id
@@ -275,13 +244,8 @@ def _try_save_task_message_to_redis(
                 profile_name=task_message.profile_name,
             )
             session_id = str(conv.id)
-        media = None
-        if task_message.media_url and task_message.msg_type in ["image", "audio"]:
-            media_item = convert_media_to_langchain_format(url=task_message.media_url, media_type=task_message.msg_type)
-            if media_item:
-                media = [media_item]
         add_message_to_history(
-            tenant_name=tenant_name, session_id=session_id, text=task_message.message or "", media=media
+            tenant_name=tenant_name, session_id=session_id, text=task_message.message or "", media=_message_media(task_message)
         )
         task_message.meta_data["langchain_synced"] = True
         # Use atomic $set so we don't overwrite other meta_data keys that were written
@@ -295,10 +259,11 @@ def _try_save_task_message_to_redis(
         logger.warning("⚠️ _try_save_task_message_to_redis failed (non-critical): %s", e)
 
 
-def save_AI_message(args, message, sid="", fake_sid=None, meta_data: dict = {}) -> MessageDocument:
-    """Helper function to save AI message to the database"""
+def save_AI_message(args, message, sid="", fake_sid=None, meta_data: dict = None) -> MessageDocument:
+    """Save the AI's message; when a message with the same sid (or fake_sid) exists, update its text instead."""
     if not message or message.strip() == "":
         return None
+    meta_data = dict(meta_data or {})
 
     # Check if a message with this sid already exists
     if sid:
@@ -335,7 +300,7 @@ def save_AI_message(args, message, sid="", fake_sid=None, meta_data: dict = {}) 
         to=args["recipient_id"],
         msg_type="text",
         media_url=None,
-        sid=sid or fake_sid or str("sid_" + datetime.utcnow().strftime("%Y%m%d%H%M%S%f")),
+        sid=sid or fake_sid or "sid_" + datetime.utcnow().strftime("%Y%m%d%H%M%S%f"),
         message_sids=[],
         date=datetime.now(tz=datetime.utcnow().astimezone().tzinfo),
         meta_data=meta_data,
@@ -349,7 +314,7 @@ def save_AI_message(args, message, sid="", fake_sid=None, meta_data: dict = {}) 
 
 
 def build_message_context(
-    tenant_name, user_id, tenant, chat_settings, extra_prompt_name, message, customer, conversation_id=None
+    tenant_name, user_id, tenant, chat_settings, message, customer, conversation_id=None
 ) -> MessageContext:
     """Build the pipeline's ``MessageContext`` for the inbound ``message`` (chat platforms)."""
     if conversation_id:
@@ -373,8 +338,6 @@ def build_message_context(
         message_type=message.msg_type,
         media_url=message.media_url,
         media_content_type=message.meta_data.get("media_content_type"),
-        extra_prompt_name=extra_prompt_name,
-        additional_context="",
         meta_data={
             "request_message": message,
             "thread_id": message.meta_data.get("thread_id"),

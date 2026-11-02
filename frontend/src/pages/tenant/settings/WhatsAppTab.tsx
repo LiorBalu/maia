@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, QrCode, RefreshCw, Trash2, Unplug } from 'lucide-react'
+import { Plus, QrCode, Trash2, Unplug } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import {
@@ -78,32 +78,69 @@ function WahaCard({ tenant }: { tenant: string }) {
 
 function WahaRow({ tenant, account, onChanged, onError }: { tenant: string; account: WahaAccount; onChanged: () => void; onError: (m: string) => void }) {
   const { t } = useTranslation()
-  const [qr, setQr] = useState<string | null>(null)
-  const [status, setStatus] = useState<string | null>(account.session_status ?? null)
+  const [qrOpen, setQrOpen] = useState(false)
 
-  const start = useMutation({ mutationFn: () => createWahaClient(tenant, account.phone_number), onSuccess: onChanged, onError: (e) => onError(errorDetail(e)) })
-  const fetchQr = useMutation({
-    mutationFn: () => getWahaQr(tenant, account.phone_number),
-    onSuccess: (data) => {
-      if (data?.data) setQr(`data:${data.mimetype || 'image/png'};base64,${data.data}`)
-      else if (typeof data?.qrCode === 'string') setQr(data.qrCode)
-      else onError(t('settings.whatsapp.wahaNoQr'))
-    },
-    onError: (e) => onError(errorDetail(e)),
+  // Live status from WAHA: polled while the QR is on screen and refetched after start/disconnect; the stored one otherwise.
+  const live = useQuery({
+    queryKey: ['waha-status', tenant, account.phone_number],
+    queryFn: () => getWahaStatus(tenant, account.phone_number),
+    enabled: qrOpen,
+    refetchInterval: qrOpen ? 4_000 : false,
+    retry: false,
   })
-  const refresh = useMutation({
-    mutationFn: () => getWahaStatus(tenant, account.phone_number),
-    onSuccess: (data) => {
-      const s = (data as { status?: string; session_status?: string })?.status ?? (data as { session_status?: string })?.session_status
-      if (s) setStatus(String(s))
+  const status = (live.data?.status as string | undefined) ?? account.session_status ?? null
+
+  // WhatsApp rotates the QR every ~20 s and WAHA gives up after ~2.5 min, so the image is refetched while open.
+  const qr = useQuery({
+    queryKey: ['waha-qr', tenant, account.phone_number],
+    queryFn: () => getWahaQr(tenant, account.phone_number),
+    enabled: qrOpen,
+    refetchInterval: qrOpen ? 15_000 : false,
+    retry: false,
+    staleTime: 0,
+    gcTime: 0,
+  })
+  const qrSrc = qr.data?.data
+    ? `data:${qr.data.mimetype || 'image/png'};base64,${qr.data.data}`
+    : typeof qr.data?.qrCode === 'string'
+      ? qr.data.qrCode
+      : null
+
+  // Scanned: close the QR and refresh the list (status badge, "connected" in the tenant header).
+  useEffect(() => {
+    if (qrOpen && status === 'WORKING') {
+      setQrOpen(false)
       onChanged()
+    }
+  }, [qrOpen, status]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 409 = already connected (no QR needed); anything else = WAHA's reason.
+  useEffect(() => {
+    if (!qr.error) return
+    const code = (qr.error as { response?: { status?: number } })?.response?.status
+    onError(code === 409 ? t('settings.whatsapp.wahaAlreadyConnected') : errorDetail(qr.error) || t('settings.whatsapp.wahaNoQr'))
+    setQrOpen(false)
+    void live.refetch()
+  }, [qr.error]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const checkStatus = () => {
+    void live.refetch().then((r) => {
+      if (r.error) onError(errorDetail(r.error))
+      else onChanged()
+    })
+  }
+  const start = useMutation({
+    mutationFn: () => createWahaClient(tenant, account.phone_number),
+    onSuccess: () => {
+      onError('')
+      checkStatus()
     },
     onError: (e) => onError(errorDetail(e)),
   })
-  const disconnect = useMutation({ mutationFn: () => disconnectWaha(tenant, account.phone_number), onSuccess: onChanged, onError: (e) => onError(errorDetail(e)) })
+  const disconnect = useMutation({ mutationFn: () => disconnectWaha(tenant, account.phone_number), onSuccess: checkStatus, onError: (e) => onError(errorDetail(e)) })
   const remove = useMutation({ mutationFn: () => deleteWahaAccount(tenant, account.phone_number), onSuccess: onChanged, onError: (e) => onError(errorDetail(e)) })
 
-  const working = status === 'WORKING' || account.is_connected
+  const working = status === 'WORKING' || (status === null && account.is_connected)
   return (
     <li className="py-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -117,13 +154,17 @@ function WahaRow({ tenant, account, onChanged, onError }: { tenant: string; acco
           <button type="button" className="btn-soft text-xs" onClick={() => start.mutate()} disabled={start.isPending}>
             {t('settings.whatsapp.wahaStart')}
           </button>
-          <button type="button" className="btn-soft text-xs" onClick={() => fetchQr.mutate()} disabled={fetchQr.isPending}>
+          <button
+            type="button"
+            className="btn-soft text-xs"
+            onClick={() => {
+              onError('')
+              setQrOpen(true)
+            }}
+            disabled={qrOpen}
+          >
             <QrCode size={14} />
             {t('settings.whatsapp.wahaQr')}
-          </button>
-          <button type="button" className="btn-ghost text-xs" onClick={() => refresh.mutate()} disabled={refresh.isPending}>
-            <RefreshCw size={14} />
-            {t('settings.whatsapp.wahaStatus')}
           </button>
           <button type="button" className="btn-ghost text-xs" onClick={() => disconnect.mutate()} disabled={disconnect.isPending}>
             <Unplug size={14} />
@@ -141,11 +182,16 @@ function WahaRow({ tenant, account, onChanged, onError }: { tenant: string; acco
           </button>
         </span>
       </div>
-      {qr && (
+      {qrOpen && (
         <div className="mt-3 flex flex-col items-center gap-2 rounded-2xl bg-white p-4 ring-1 ring-brand-100">
-          <img src={qr} alt="QR" className="h-56 w-56" />
+          {qrSrc ? (
+            <img src={qrSrc} alt="QR" className="h-56 w-56" />
+          ) : (
+            <div className="flex h-56 w-56 items-center justify-center text-sm text-ink-soft">{t('settings.whatsapp.wahaQrLoading')}</div>
+          )}
           <p className="text-xs text-ink-soft">{t('settings.whatsapp.wahaScan')}</p>
-          <button type="button" className="btn-ghost text-xs" onClick={() => setQr(null)}>
+          <p className="text-xs text-ink-soft">{t('settings.whatsapp.wahaQrRefreshes')}</p>
+          <button type="button" className="btn-ghost text-xs" onClick={() => setQrOpen(false)}>
             {t('common.close')}
           </button>
         </div>

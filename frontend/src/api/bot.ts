@@ -12,16 +12,6 @@ export interface Prompt {
   prompt?: string | null
   content?: string | null
   label?: string | null
-  prompt_type?: 'text' | 'structured' | null
-  modified_at?: string | null
-  modified_by?: string | null
-}
-
-export interface PromptHistoryEntry {
-  name: string
-  tenant_name: string
-  content?: string | null
-  prompt_type?: string
   modified_at?: string | null
   modified_by?: string | null
 }
@@ -40,7 +30,6 @@ export async function updatePromptText(tenant: string, name: string, content: st
     name,
     tenant_name: tenant,
     content,
-    prompt_type: 'text',
   })
   return data
 }
@@ -50,13 +39,7 @@ export async function createPromptText(tenant: string, name: string, content: st
     name,
     tenant_name: tenant,
     content,
-    prompt_type: 'text',
   })
-  return data
-}
-
-export async function listPromptHistory(tenant: string): Promise<PromptHistoryEntry[]> {
-  const { data } = await api.get<PromptHistoryEntry[]>(`/management/v1/prompts/history/${enc(tenant)}`)
   return data
 }
 
@@ -95,14 +78,16 @@ export async function createAgent(tenant: string, input: AgentInput): Promise<Ag
   return data
 }
 
-export const PROVIDERS = ['openai', 'anthropic', 'google'] as const
+// The backend RAG matches these exact values (conversational_rag.py: "openai" / "anthropic" / "google_llm").
+export const PROVIDERS = ['openai', 'anthropic', 'google_llm'] as const
 
-// OpenAI: newest families first (gpt-6.1 / gpt-6 / gpt-5.6 tiers: astra = strongest, sol = strong,
-// terra = balanced, luna = cheapest), then the dated gpt-5.x releases and the gpt-4 generation.
+// OpenAI: the default (gpt-6.1-terra, also the backend's default) first, then the newest families
+// (gpt-6.1 / gpt-6 / gpt-5.6 tiers: astra = strongest, sol = strong, terra = balanced, luna = cheapest),
+// the dated gpt-5.x releases and the gpt-4 generation.
 export const MODEL_SUGGESTIONS: Record<string, string[]> = {
   openai: [
-    'gpt-6.1-sol',
     'gpt-6.1-terra',
+    'gpt-6.1-sol',
     'gpt-6-astra',
     'gpt-6-sol',
     'gpt-6-luna',
@@ -122,7 +107,7 @@ export const MODEL_SUGGESTIONS: Record<string, string[]> = {
     'gpt-4o-mini',
   ],
   anthropic: ['claude-sonnet-4-5', 'claude-haiku-4-5', 'claude-opus-4-1'],
-  google: ['gemini-2.5-pro', 'gemini-2.5-flash'],
+  google_llm: ['gemini-2.5-pro', 'gemini-2.5-flash'],
 }
 
 // ---------- Test chat (web channel, same pipeline as the real channels) ----------

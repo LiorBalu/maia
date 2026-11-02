@@ -40,7 +40,6 @@ export interface ApiCustomer {
   avatar?: string | null
   created_date?: string | null
   updated_date?: string | null
-  notes?: unknown[]
   meetings?: ApiMeeting[]
   meta_data?: Record<string, unknown> | null
 }

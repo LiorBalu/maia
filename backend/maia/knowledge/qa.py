@@ -85,18 +85,15 @@ def create_qa_embedding(qa_id: str) -> Dict[str, Any]:
 
     # Detect if question is an image data URI
     is_image = _is_image_data_uri(qa.question)
-    logger.info(f"DEBUG create_qa_embedding: qa_id={qa_id}, is_image={is_image}, question_starts_with={qa.question[:50]}..., answer={qa.answer}")
 
     if is_image:
         # Embed the IMAGE using Cohere multimodal embedding
         embeddings = CohereEmbeddingsV4(input_type="search_document")
         vector = embeddings.embed_image(qa.question)
-        logger.info(f"DEBUG IMAGE embedded! vector length={len(vector)}, first 5 values={vector[:5]}")
     else:
         # Embed the QUESTION text only (not combined text)
         embeddings = CohereEmbeddingsV4(input_type="search_document")
         vector = embeddings.embed_query(qa.question)
-        logger.info(f"DEBUG TEXT embedded: vector length={len(vector)}")
 
     # Convert MongoDB ID to Qdrant point ID
     point_id = _mongodb_id_to_point_id(str(qa.id))
@@ -167,19 +164,15 @@ def search_in_qa(
         return []
 
     # Create embedding for query using Cohere
-    logger.info(f"DEBUG search_in_qa: tenant={tenant_name}, query_image={'YES (len=' + str(len(query_image)) + ')' if query_image else 'NO'}, text_query={query[:80]}")
-
     if query_image:
         # Image query: embed the image for multimodal similarity search
         embeddings = CohereEmbeddingsV4(input_type="search_query")
         query_vector = embeddings.embed_image(query_image)
-        logger.info(f"DEBUG IMAGE query embedded! vector length={len(query_vector)}")
         is_image_query = True
     else:
         # Text query: embed text normally
         embeddings = CohereEmbeddingsV4(input_type="search_query")
         query_vector = embeddings.embed_query(query)
-        logger.info(f"DEBUG TEXT query embedded: vector length={len(query_vector)}")
         is_image_query = False
 
     # Build filter if provided (keep logic close to original)
@@ -248,9 +241,6 @@ def search_in_qa(
     # For image queries, skip text-based Cohere rerank (it only works on text).
     # Vector similarity from Cohere embed-v4.0 multimodal tenant is already meaningful.
     if is_image_query:
-        logger.warning(f"DEBUG Image query: skipping text rerank, returning top {top_k} by vector similarity")
-        for i, c in enumerate(candidates[:top_k]):
-            logger.info(f"  #{i+1} score={c['score']:.4f} answer={c['answer']} is_image_q={c.get('is_image_question', '?')}")
         return candidates[:top_k]
 
     # Cohere rerank (best-effort; fallback to vector order on any failure)

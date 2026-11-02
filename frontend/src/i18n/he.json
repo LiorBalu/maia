@@ -7,13 +7,11 @@
     "loading": "טוען...",
     "error": "משהו השתבש. נסי שוב.",
     "retry": "נסי שוב",
-    "search": "חיפוש",
     "logout": "יציאה",
     "enter": "כניסה לעסק",
     "menu": "תפריט",
     "close": "סגירה",
-    "language": "שפה",
-    "timezone": "אזור זמן"
+    "language": "שפה"
   },
   "login": {
     "title": "כניסה למערכת",
@@ -23,7 +21,6 @@
     "submit": "כניסה",
     "submitting": "נכנסת...",
     "failed": "האימייל או הסיסמה שגויים",
-    "device": "נדרש אימות מכשיר. פני למנהלת המערכת.",
     "server": "אין חיבור לשרת. בדקי שהבקאנד רץ."
   },
   "nav": {
@@ -51,28 +48,24 @@
     "subtitle": "כל העסקים במערכת. לחיצה על עסק נכנסת אליו.",
     "count_one": "עסק אחד",
     "count_other": "{{count}} עסקים",
-    "search": "חיפוש לפי שם...",
-    "status": {
-      "active": "פעיל",
-      "inactive": "לא פעיל",
-      "pending": "ממתין"
-    },
     "channels": {
       "whatsapp": "וואטסאפ",
       "email": "מייל",
       "telephone": "טלפון"
     },
     "noChannels": "אין ערוצים מחוברים",
-    "noDescription": "ללא תיאור",
     "empty": "לא נמצאו עסקים",
     "create": {
       "button": "עסק חדש",
       "title": "פתיחת עסק חדש",
-      "subtitle": "נוצרים אוטומטית פרומפט, סוכן והגדרות ברירת מחדל. אחר כך ממשיכים להגדרות העסק.",
+      "subtitle": "נוצרים אוטומטית פרומפט, סוכן והגדרות ברירת מחדל, וגם משתמש לבעל העסק שנכנס עם המייל והסיסמה שכאן. אחר כך ממשיכים להגדרות העסק.",
       "display": "שם העסק",
       "displayHelp": "השם שמוצג במערכת, בעברית או באנגלית.",
       "slug": "מזהה המערכת",
       "slugHelp": "אותיות לטיניות קטנות, ספרות ומקפים. משמש בכתובות ולא ניתן לשינוי.",
+      "ownerEmail": "מייל בעל העסק (שם המשתמש)",
+      "ownerEmailHelp": "איתו בעל העסק נכנס למערכת ורואה רק את העסק הזה.",
+      "ownerPassword": "סיסמה לבעל העסק",
       "submit": "יצירת העסק",
       "failed": "היצירה נכשלה. {{reason}}"
     }
@@ -87,9 +80,6 @@
     "lastLogin": "כניסה אחרונה",
     "never": "אף פעם",
     "empty": "אין משתמשים",
-    "delete": "מחיקת המשתמש",
-    "deleteConfirm": "למחוק את המשתמש {{email}}? הוא לא יוכל להיכנס יותר.",
-    "deleteFailed": "המחיקה נכשלה. {{reason}}",
     "create": {
       "button": "משתמש חדש",
       "title": "הוספת משתמש",
@@ -133,7 +123,7 @@
     "noMessages": "אין עדיין הודעות בשיחה הזו.",
     "unread": "לא נקראה",
     "status": { "online": "פעילה", "closed": "הסתיימה" },
-    "roles": { "user": "לקוח/ה", "assistant": "הבוט", "manager": "נציג/ה" },
+    "roles": { "assistant": "הבוט", "manager": "נציג/ה" },
     "msg": {
       "transcript": "תמלול",
       "openFile": "פתיחת הקובץ",
@@ -182,9 +172,7 @@
       "lastMessage": "הודעה אחרונה",
       "meetings": "פגישות",
       "noMeetings": "אין פגישות רשומות.",
-      "until": "עד",
-      "notes": "הערות",
-      "noNotes": "אין הערות."
+      "until": "עד"
     }
   },
   "knowledge": {
@@ -260,7 +248,7 @@
     "copied": "הועתק"
   },
   "bot": {
-    "tabs": { "prompt": "פרומפט", "model": "מודל", "test": "בדקי את הבוט" },
+    "tabs": { "prompt": "פרומפט", "model": "מודל", "tools": "כלים", "test": "בדקי את הבוט" },
     "prompt": {
       "chatTitle": "הפרומפט של הצ'אט",
       "chatSubtitle": "ההנחיות שהבוט מקבל בוואטסאפ, במייל ובאתר: מי הוא, איך לדבר, מה מותר ומה אסור.",
@@ -270,10 +258,6 @@
       "chars": "{{count}} תווים",
       "modified": "עודכן",
       "discard": "ביטול השינויים",
-      "history": "היסטוריה ({{count}})",
-      "historyTitle": "גרסאות קודמות (עד 10). לחיצה על \"שחזור\" מעתיקה את הגרסה לתיבת העריכה, ואז שומרים.",
-      "noHistory": "אין גרסאות קודמות.",
-      "restore": "שחזור",
       "saveFailed": "השמירה נכשלה. {{reason}}"
     },
     "model": {
@@ -281,7 +265,7 @@
       "subtitle": "איזה מודל שפה מנסח את התשובות.",
       "provider": "ספק",
       "providerHelp": "כרגע העסקים עובדים עם OpenAI. ספק אחר דורש מפתח API בבקאנד.",
-      "providers": { "openai": "OpenAI", "anthropic": "Anthropic (Claude)", "google": "Google (Gemini)" },
+      "providers": { "openai": "OpenAI", "anthropic": "Anthropic (Claude)", "google_llm": "Google (Gemini)" },
       "providerNotice": "ספק שאינו OpenAI יעבוד רק אם הוגדר לו מפתח בצד השרת.",
       "model": "מודל",
       "modelHelp": "ב־OpenAI: astra = החזק והיקר ביותר, sol = חזק, terra = מאוזן, luna = הזול והמהיר. מודל שלא ברשימה: \"אחר\" והקלדה.",
@@ -295,6 +279,46 @@
       "topKQaHelp": "כמה שאלות־תשובות דומות נשלחים למודל (5 ברירת מחדל).",
       "scoreThreshold": "סף דמיון",
       "scoreThresholdHelp": "קטעים עם דמיון נמוך מהסף לא נשלחים. גבוה מדי = הבוט לא ימצא מידע."
+    },
+    "tools": {
+      "notice": "כלי = פעולה שהבוט יכול לבצע מעבר למענה מהידע (למשל לקבוע תור). כלי שכבוי לא קיים עבור הבוט בכלל. הבחירה חלה על כל הערוצים: וואטסאפ, מייל, אתר וטלפון.",
+      "empty": "אין כלים רשומים בשרת.",
+      "all": "לבחור הכל",
+      "none": "לבטל הכל",
+      "count_one": "כלי אחד נבחר",
+      "count_other": "{{count}} כלים נבחרו",
+      "openCalendar": "לחיבור היומן ושעות הפעילות ←",
+      "openSheets": "לחיבור הגיליון ←",
+      "groups": {
+        "google_calendar": "יומן Google",
+        "google_sheets": "Google Sheets",
+        "other": "כלים של העסק"
+      },
+      "groupHelp": {
+        "google_calendar": "קביעה, שינוי וביטול תורים. דורש יומן Google מחובר בעמוד \"יומן\".",
+        "google_sheets": "חיפוש חי בגיליון של העסק (מחירים, מלאי, קטלוג). דורש גיליון מחובר בהגדרות.",
+        "other": "כלים שנכתבו בקוד במיוחד לעסק הזה."
+      },
+      "names": {
+        "st_get_available_event_times": "שעות פנויות קרובות",
+        "st_get_available_times_by_range": "שעות פנויות בטווח תאריכים",
+        "st_check_availability_by_date_and_time": "בדיקת זמינות לשעה מסוימת",
+        "st_schedule_event": "קביעת תור",
+        "st_get_event_details": "פרטי תור קיים",
+        "st_reschedule_event": "שינוי תור",
+        "st_cancel_event": "ביטול תור",
+        "st_search_sheet": "חיפוש בגיליון"
+      },
+      "descriptions": {
+        "st_get_available_event_times": "כשהלקוח לא ציין תאריך: מחזיר את התורים הפנויים הקרובים ביומן.",
+        "st_get_available_times_by_range": "מחזיר שעות פנויות בין תאריכים שהלקוח ביקש (\"שבוע הבא\", \"בין ראשון לשלישי\").",
+        "st_check_availability_by_date_and_time": "בודק אם תאריך ושעה מסוימים שהלקוח ביקש פנויים.",
+        "st_schedule_event": "קובע תור חדש ביומן Google של העסק.",
+        "st_get_event_details": "מאתר את התור הקיים של הלקוח ומחזיר את פרטיו (שלב ראשון לפני שינוי או ביטול).",
+        "st_reschedule_event": "מעביר תור קיים לזמן אחר.",
+        "st_cancel_event": "מבטל תור קיים ביומן.",
+        "st_search_sheet": "מחפש בגיליון המחובר ומחזיר את השורות המתאימות: מחיר, מלאי, או כל המוצרים בקטגוריה."
+      }
     },
     "test": {
       "notice": "הבדיקה עוברת באותו צינור בדיוק כמו וואטסאפ ומייל: אותו פרומפט, אותו ידע, אותם כלים. השיחה נשמרת גם בתיבת ההודעות תחת \"אתר\".",
@@ -354,10 +378,6 @@
     "tabs": { "general": "כללי", "whatsapp": "וואטסאפ", "email": "מייל", "phone": "טלפון", "sheets": "Google Sheets" },
     "connected": "מחובר",
     "notConnected": "לא מחובר",
-    "webhooks": {
-      "publicUrl": "הכתובת הציבורית של השרת",
-      "publicUrlHelp": "בפיתוח: כתובת ה־ngrok (בלי לוכסן בסוף). נשמרת רק בדפדפן הזה ומשמשת להרכבת הכתובות למטה."
-    },
     "general": {
       "businessTitle": "פרטי העסק",
       "businessSubtitle": "מזהה המערכת: {{tenant}}",
@@ -372,25 +392,25 @@
       "humanDelay": "השהיה \"אנושית\" לפני תשובה",
       "humanDelayHelp": "הבוט מחכה קצת לפני שעונה, כמו אדם שמקליד.",
       "humanDelayTime": "שניות השהיה",
-      "imageToText": "קריאת טקסט מתמונות",
-      "imageToTextHelp": "תמונה שלקוח שולח מומרת לטקסט (OCR) והבוט מתייחס אליה.",
       "callAutoReset": "איפוס שיחת הטלפון בכל שיחה",
       "callAutoResetHelp": "כל שיחת טלפון מתחילה בלי היסטוריה מהשיחה הקודמת. שיחות הוואטסאפ לא נפגעות."
     },
     "whatsapp": {
       "wahaTitle": "וואטסאפ (WAHA)",
       "wahaSubtitle": "חיבור מספר וואטסאפ רגיל של העסק דרך סריקת QR מהטלפון, כמו מכשיר מקושר.",
-      "wahaNotice": "הסדר: הוספת המספר ← יצירת חיבור ← הצגת QR ← סריקה בטלפון ← בדיקת סטטוס עד WORKING. דורש ששרת ה־WAHA ירוץ לצד הבקאנד.",
+      "wahaNotice": "הסדר: הוספת המספר ← הצגת QR ← סריקה בטלפון (הקוד מתחלף לבד) ← החלון נסגר והסטטוס הופך ל־WORKING. \"יצירת חיבור\" מפעיל מחדש חיבור שנתקע. מספר אחד יכול להיות מחובר לעסק אחד בלבד. דורש ששרת ה־WAHA ירוץ לצד הבקאנד.",
       "wahaPhone": "מספר הטלפון",
       "wahaPhoneHelp": "ספרות בלבד עם קידומת מדינה, למשל 972501234567.",
       "wahaAdd": "הוספה",
       "wahaStart": "יצירת חיבור",
       "wahaQr": "הצגת QR",
-      "wahaStatus": "בדיקת סטטוס",
       "wahaDisconnect": "ניתוק",
       "wahaRemoveConfirm": "להסיר את המספר הזה מהעסק?",
       "wahaScan": "סרקי עם וואטסאפ בטלפון: הגדרות ← מכשירים מקושרים ← קישור מכשיר.",
-      "wahaNoQr": "אין עדיין QR. לחצי \"יצירת חיבור\" וחכי כמה שניות."
+      "wahaQrRefreshes": "הקוד מתרענן לבד; אין צורך ללחוץ שוב. אחרי הסריקה החלון ייסגר לבד.",
+      "wahaQrLoading": "מכינים את הקוד...",
+      "wahaAlreadyConnected": "המספר כבר מחובר (WORKING), אין צורך ב־QR.",
+      "wahaNoQr": "לא התקבל QR. נסי שוב בעוד כמה שניות."
     },
     "email": {
       "title": "חשבון Gmail",
@@ -436,11 +456,9 @@
     },
     "phone": {
       "numbersTitle": "מספרים",
-      "numbersSubtitle": "המספר שלקוחות מתקשרים אליו ומספר לנציג/ה.",
+      "numbersSubtitle": "המספר שלקוחות מתקשרים אליו.",
       "number": "מספר הטלפון של העסק",
       "numberHelp": "מספר הקול שנרכש ב־Twilio, בפורמט בינלאומי.",
-      "representative": "מספר נציג/ה",
-      "representativeHelp": "לא חובה: מספר אנושי להפניה.",
       "voiceTitle": "הקול של הבוט",
       "voiceSubtitle": "הטלפון עובד על OpenAI Realtime: הבוט מדבר ושומע ישירות.",
       "voice": "קול",
@@ -449,8 +467,6 @@
       "speedHelp": "1 = רגיל.",
       "listeningTitle": "זיהוי דיבור",
       "listeningSubtitle": "מתי הבוט מבין שהלקוח סיים לדבר.",
-      "threshold": "רגישות לזיהוי דיבור",
-      "thresholdHelp": "נמוך = קולט גם דיבור חלש (ורעשים). גבוה = צריך לדבר ברור.",
       "silence": "שקט שנחשב סוף משפט",
       "silenceHelp": "כמה זמן של שקט עד שהבוט עונה. קצר מדי = קוטע את הלקוח.",
       "prefix": "ריפוד לפני הדיבור",
@@ -458,22 +474,7 @@
       "noiseMode": "סינון רעשים של OpenAI",
       "noiseModeHelp": "near_field לטלפון צמוד לאוזן, far_field לרמקול.",
       "noiseModes": { "near_field": "קרוב (near field)", "far_field": "רחוק (far field)", "none": "ללא" },
-      "noiseSuppression": "סינון רעשים נוסף בצד השרת",
-      "noiseSuppressionHelp": "עיבוד אודיו לפני שליחה ל־OpenAI. כבוי כברירת מחדל.",
-      "realtimeNotice": "משפט הפתיחה וההנחיות לשיחה נמצאים בפרומפט הטלפון, במסך \"הבוט\".",
-      "webhooksTitle": "כתובת להדבקה ב־Twilio",
-      "webhooksSubtitle": "בהגדרות מספר הקול ב־Twilio, תחת \"A call comes in\".",
-      "voiceUrl": "שיחה נכנסת (POST)",
-      "voiceHelp": "Twilio פונה לכאן כשמתקשרים, והשרת פותח את שיחת הקול.",
-      "twilioTitle": "חשבון Twilio (קול)",
-      "twilioSubtitle": "נדרש רק כדי למשוך את הקלטת השיחה אחרי שהיא מסתיימת. הפרטים מהקונסול של Twilio.",
-      "accountSid": "Account SID",
-      "authToken": "Auth Token",
-      "authTokenHelp": "נשמר בשרת ולא מוצג שוב במלואו.",
-      "twilioPhone": "מספר הקול ב־Twilio",
-      "twilioPhoneHelp": "בפורמט בינלאומי, אותו מספר כמו בשדה \"מספר הטלפון של העסק\".",
-      "remove": "הסרת החשבון",
-      "removeConfirm": "להסיר את חשבון Twilio מהעסק? השיחות ימשיכו לעבוד, רק בלי הקלטות."
+      "realtimeNotice": "משפט הפתיחה וההנחיות לשיחה נמצאים בפרומפט הטלפון, במסך \"הבוט\"."
     }
   },
   "pages": {
@@ -491,7 +492,7 @@
     },
     "bot": {
       "title": "הבוט",
-      "desc": "פרומפט, מודל ובדיקה של הבוט."
+      "desc": "פרומפט, מודל, כלים ובדיקה של הבוט."
     },
     "settings": {
       "title": "הגדרות וחיבורים",

@@ -11,11 +11,8 @@ from langchain_classic.chains.combine_documents.stuff import create_stuff_docume
 # LangChain 1.0 imports - functions moved to langchain_classic
 from langchain_classic.chains.history_aware_retriever import create_history_aware_retriever
 from langchain_classic.chains.retrieval import create_retrieval_chain
-from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.messages import HumanMessage
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.outputs import LLMResult
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -29,14 +26,6 @@ from maia.utils.get_time_of_day import get_time_of_day
 from maia.knowledge.search import CombinedRetriever, MultiDocumentRetriever, QARetriever
 
 logger = logging.getLogger(__name__)
-# Redis client for session management (chat history).
-try:
-    from maia.services.redis_clients import get_sync_redis
-
-    redis_client = get_sync_redis(decode_responses=False)
-except Exception:
-    # Will be handled when actually needed
-    redis_client = None
 
 
 # What OpenAI's /v1/chat/completions accepts from each model family (checked live against the
@@ -83,60 +72,6 @@ def message_text(content: Any) -> str:
     return "" if content is None else str(content)
 
 
-class TokenUsageCallbackHandler(BaseCallbackHandler):
-    """
-    Callback handler to track token usage from LLM calls.
-    Works with OpenAI, Anthropic, Google, and other providers.
-    """
-
-    def __init__(self):
-        """Start every token counter at zero."""
-        super().__init__()
-        self.prompt_tokens = 0
-        self.completion_tokens = 0
-        self.total_tokens = 0
-        self.successful_requests = 0
-
-    def on_llm_end(self, response: LLMResult, **kwargs) -> None:
-        """Called when LLM ends running."""
-        # Extract token usage from the response
-        if response.llm_output and "token_usage" in response.llm_output:
-            usage = response.llm_output["token_usage"]
-            # OpenAI format
-            if "prompt_tokens" in usage and "completion_tokens" in usage:
-                self.prompt_tokens += usage.get("prompt_tokens", 0)
-                self.completion_tokens += usage.get("completion_tokens", 0)
-                self.total_tokens += usage.get("total_tokens", 0)
-            # Anthropic format
-            elif "input_tokens" in usage and "output_tokens" in usage:
-                self.prompt_tokens += usage.get("input_tokens", 0)
-                self.completion_tokens += usage.get("output_tokens", 0)
-                self.total_tokens += usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
-        else:
-            # Also check usage_metadata (newer LangChain versions)
-            for generations in response.generations:
-                for generation in generations:
-                    if hasattr(generation, "message") and hasattr(generation.message, "usage_metadata"):
-                        usage_meta = generation.message.usage_metadata
-                        # usage_metadata is a dict, not an object
-                        if isinstance(usage_meta, dict):
-                            if "input_tokens" in usage_meta and "output_tokens" in usage_meta:
-                                self.prompt_tokens += usage_meta.get("input_tokens", 0)
-                                self.completion_tokens += usage_meta.get("output_tokens", 0)
-                                self.total_tokens += usage_meta.get("total_tokens", 0) or (
-                                    usage_meta.get("input_tokens", 0) + usage_meta.get("output_tokens", 0)
-                                )
-
-        self.successful_requests += 1
-
-    def reset(self):
-        """Reset counters for new tracking session."""
-        self.prompt_tokens = 0
-        self.completion_tokens = 0
-        self.total_tokens = 0
-        self.successful_requests = 0
-
-
 class ConversationalRAG:
     """
     Conversational RAG system using LangChain's conversation chains with Redis for session management.
@@ -176,9 +111,6 @@ class ConversationalRAG:
         if self.direct_answer_threshold > 0:
             logger.info(f"Direct answer threshold set to {self.direct_answer_threshold} for tenant '{tenant_name}'")
 
-        # Initialize token usage callback handler
-        self.token_callback = TokenUsageCallbackHandler()
-
         # Get the tenant to retrieve API keys
         tenant = TenantDocument.objects(name=tenant_name).first()
         if not tenant:
@@ -188,12 +120,11 @@ class ConversationalRAG:
 
         # Setup LLM based on provider
         provider = self.agent_config.get("provider", "openai")
-        self.provider = provider  # Store provider for usage tracking
 
         if provider == "openai":
             if not self.openai_api_key:
                 raise ValueError(f"No OpenAI API key found for tenant {tenant_name}")
-            model_name = self.agent_config.get("model", "gpt-4.1")
+            model_name = self.agent_config.get("model", "gpt-6.1-terra")
             self.llm = ChatOpenAI(
                 openai_api_key=self.openai_api_key,
                 model=model_name,
@@ -372,13 +303,6 @@ class ConversationalRAG:
                 "qa_sources_count": sum(1 for s in sources if s.get("source_type") == "qa"),
                 "direct_answer": True,
                 "direct_answer_score": best_score,
-                "usage": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                    "model": self.agent_config.get("model", "gpt-4.1"),
-                    "provider": self.provider,
-                },
             }
 
         except Exception as e:
@@ -424,18 +348,7 @@ class ConversationalRAG:
         qa_top_k = max(0, _safe_int(self.agent_config.get("top_k_qa", 5), 5))
 
         # Extract score_threshold from agent config (default 0 = no filtering)
-        def _safe_float(value: Any, default: float) -> float:
-            """float(value), or the default for None / empty / invalid values."""
-            try:
-                if value is None:
-                    return default
-                if isinstance(value, str) and value.strip().lower() in ("none", "null", ""):
-                    return default
-                return float(value)
-            except Exception:
-                return default
-
-        score_threshold = _safe_float(self.agent_config.get("score_threshold", 0), 0)
+        score_threshold = self._safe_float_static(self.agent_config.get("score_threshold", 0), 0)
 
         # Add document retriever if enabled
         if self.include_documents:
@@ -497,9 +410,6 @@ class ConversationalRAG:
         contextualize_q_prompt = ChatPromptTemplate.from_messages(
             [("system", contextualize_q_system_prompt), MessagesPlaceholder("chat_history"), ("human", "{input}")]
         )
-
-        # Store reformulation chain to expose the standalone question
-        self.reformulation_chain = contextualize_q_prompt | self.llm | StrOutputParser()
 
         # Create history-aware retriever with text-only filter for chat history
         # This filters out media (images, audio) during question reformulation
@@ -742,13 +652,10 @@ class ConversationalRAG:
                 history.add_message(multimodal_message)
                 logger.info(f"Added {len(media)} media item(s) to conversation history")
 
-            # Reset callback counters for this request
-            self.token_callback.reset()
-
-            # Call RAG chain with text for retrieval, include callback in config
+            # Call RAG chain with text for retrieval
             response = await self.conversational_rag_chain.ainvoke(
                 {"input": message},
-                config={"configurable": {"session_id": session_id}, "callbacks": [self.token_callback]},
+                config={"configurable": {"session_id": session_id}},
             )
 
             # Retrieve the reformulated question from the retriever
@@ -759,11 +666,6 @@ class ConversationalRAG:
                     logger.info(f"✅ Reformulated question retrieved from retriever: '{reformulated_question[:100]}..."
                         if len(reformulated_question) > 100
                         else f"✅ Reformulated question: '{reformulated_question}'")
-
-            # Extract token usage from callback
-            prompt_tokens = self.token_callback.prompt_tokens
-            completion_tokens = self.token_callback.completion_tokens
-            total_tokens = self.token_callback.total_tokens
 
             context_docs = response.get("context", [])
 
@@ -808,13 +710,6 @@ class ConversationalRAG:
                 "sources_found": len(sources),
                 "documents_sources_count": sum(1 for s in sources if s.get("source_type") == "document"),
                 "qa_sources_count": sum(1 for s in sources if s.get("source_type") == "qa"),
-                "usage": {
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "total_tokens": total_tokens,
-                    "model": self.agent_config.get("model", "gpt-4.1"),
-                    "provider": self.provider,
-                },
             }
         except Exception as e:
             import traceback

@@ -1,24 +1,22 @@
-"""Admin API: tenants (businesses): list, create with defaults, detail (masked secrets), update, ownership, delete."""
+"""Admin API: tenants (businesses): list, create with defaults, detail (masked secrets), update, ownership."""
 
 import logging
 import os
 import re
 from typing import List, Literal, Optional, Union
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Security
+from fastapi import APIRouter, HTTPException, Request, Security
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from maia.models.platform_defaults import create_default_platform_settings
 from maia.services.registry import update_tenant_document
-from maia.models.tenants import AnthropicSettings, AnthropicSettingsModel, GoogleLLMSettings, GoogleLLMSettingsModel, OpenAISettings, OpenAISettingsModel, PlatformBotSettings, PlatformBotSettingsModel, WahaAccountModel, TenantCustomer, TenantDocument, TwilioAccount, TwilioAccountModel
+from maia.models.tenants import AnthropicSettings, AnthropicSettingsModel, GoogleLLMSettings, GoogleLLMSettingsModel, OpenAISettings, OpenAISettingsModel, WahaAccountModel, TenantCustomer, TenantDocument, TwilioAccount, TwilioAccountModel
 from maia.models.users import User, UserDocument
 from maia.models.settings import CallSettingsDocument, ChatSettingsDocument
 from maia.models.tenant_features import FeatureTenant, FeatureTenantModel
-from maia.api.security import (
-    authenticate_user_token,
-    verify_token_extended,
-)
+from maia.api.security import verify_token_extended
+from maia.api.auth import assert_email_free, create_tenant_member, validate_password_policy
+from maia.pipeline.tools.function_decorator import FunctionTool
 from maia.utils.make_automation import make_automation
 
 logger = logging.getLogger(__name__)
@@ -33,9 +31,7 @@ def ensure_default_chat_call_settings(tenant_name: str) -> None:
         chat_settings.update_all_features()
         chat_settings.save()
     if not CallSettingsDocument.objects(tenant_name=tenant_name).first():
-        call_settings = CallSettingsDocument(tenant_name=tenant_name)
-        call_settings.update_all_features()
-        call_settings.save()
+        CallSettingsDocument(tenant_name=tenant_name).save()
 
 
 def get_embedded_doc_as_dict(embedded_doc) -> dict:
@@ -139,7 +135,7 @@ tenant_router = APIRouter(prefix="/tenants", tags=["Tenants"])
 
 
 class TenantRequest(BaseModel):
-    """Body of tenant creation / update: status, LLM providers, channels, bot settings per platform, features."""
+    """Body of tenant creation / update: status, LLM providers, channels, features, tools."""
     name: Optional[str] = None
     status: Literal["active", "inactive", "pending"] = "active"
     description: Optional[str] = None
@@ -151,11 +147,12 @@ class TenantRequest(BaseModel):
     openai_settings: Optional[OpenAISettingsModel] = None
     anthropic_settings: Optional[AnthropicSettingsModel] = None
     google_llm_settings: Optional[GoogleLLMSettingsModel] = None
-    platform_bot_settings: Optional[List[PlatformBotSettingsModel]] = []
     features: List[FeatureTenantModel] = []
     default_language: Optional[str] = "he"
     default_timezone: Optional[str] = DEFAULT_TIMEZONE
     owner_phone_number: Optional[str] = None
+    # Names of the registered `@gpt_tool` functions the bot may call (see GET /management/v1/tools)
+    tools: Optional[List[str]] = None
 
     class Config:
         """Example payload shown in the API docs."""
@@ -176,6 +173,16 @@ class TenantRequest(BaseModel):
                 "manual_mode": False,
             }
         }
+
+
+class TenantCreateRequest(TenantRequest):
+    """Body of POST / PUT: a new business may come with its owner's dashboard login (POST only; ignored on PUT).
+    Kept out of `TenantRequest` so the list response never carries these fields."""
+    owner_email: Optional[str] = None
+    owner_password: Optional[str] = None
+
+
+OWNER_FIELDS = ("owner_email", "owner_password")
 
 
 @tenant_router.get("", response_model=List[TenantRequest])
@@ -206,8 +213,18 @@ async def get_tenants(user: UserDocument = Security(verify_token_extended, scope
 _SKIP_FIELD = object()
 
 
-def _validate_create_tenant_request(request: Request, tenant_request: TenantRequest, user: User) -> None:
-    """Guard the POST (creation) flow: authorisation and tenant-name format."""
+def _validated_tools(names: Optional[List[str]]) -> List[str]:
+    """The tool names to store: deduplicated, every one registered at startup (400 otherwise)."""
+    unique = list(dict.fromkeys(name for name in (names or []) if name))
+    unknown = [name for name in unique if not FunctionTool.get_function(name)]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown tools: {', '.join(unknown)}")
+    return unique
+
+
+def _validate_create_tenant_request(request: Request, tenant_request: TenantCreateRequest, user: User) -> None:
+    """Guard the POST (creation) flow: authorisation, tenant-name format, and the owner login when given
+    (both fields together, free email, password policy) so that nothing is created when it is invalid."""
     if request.method != "POST":
         return
     if not user.is_staff:
@@ -217,6 +234,11 @@ def _validate_create_tenant_request(request: Request, tenant_request: TenantRequ
     tenant_request.name = tenant_request.name.lower().replace(" ", "_")
     if not re.match("^[a-zA-Z0-9_-]+$", tenant_request.name):
         raise HTTPException(status_code=400, detail="The name must be alphanumeric and may contain digits, _, or -.")
+    if bool(tenant_request.owner_email) != bool(tenant_request.owner_password):
+        raise HTTPException(status_code=400, detail="Owner email and password go together")
+    if tenant_request.owner_email:
+        tenant_request.owner_email = assert_email_free(tenant_request.owner_email)
+        validate_password_policy(tenant_request.owner_password)
 
 
 def _merged_embedded_settings(existing, value, settings_cls):
@@ -243,20 +265,21 @@ def _converted_update_value(tenant_doc: TenantDocument, key: str, value):
         return _merged_embedded_settings(tenant_doc.anthropic_settings, value, AnthropicSettings)
     if key == "google_llm_settings":
         return _merged_embedded_settings(tenant_doc.google_llm_settings, value, GoogleLLMSettings)
+    if key == "tools":
+        # An explicit list (even empty) replaces the stored one; null leaves it untouched.
+        return _SKIP_FIELD if value is None else _validated_tools(value)
     if not value:
         return value
     if key == "twilio_accounts":
         return [TwilioAccount(**account) for account in value]
     if key == "features":
         return [FeatureTenant(**feature) for feature in value]
-    if key == "platform_bot_settings":
-        return [PlatformBotSettings(**setting) for setting in value]
     return value
 
 
 def _apply_tenant_update(tenant_doc: TenantDocument, tenant_request: TenantRequest) -> None:
     """Apply a partial update on an existing tenant."""
-    update_fields = tenant_request.dict(exclude_unset=True)
+    update_fields = tenant_request.dict(exclude_unset=True, exclude=set(OWNER_FIELDS))
     for key, value in update_fields.items():
         converted = _converted_update_value(tenant_doc, key, value)
         if converted is _SKIP_FIELD:
@@ -276,8 +299,8 @@ def _embedded_or_dropped(tenant_dict: dict, key: str, settings_cls) -> None:
 
 
 def _build_new_tenant_document(tenant_request: TenantRequest) -> TenantDocument:
-    """Build a brand-new ``TenantDocument`` from the request."""
-    tenant_dict = tenant_request.dict()
+    """Build a brand-new ``TenantDocument`` from the request (the owner login is not a tenant field)."""
+    tenant_dict = tenant_request.dict(exclude=set(OWNER_FIELDS))
     if tenant_dict.get("twilio_accounts"):
         tenant_dict["twilio_accounts"] = [TwilioAccount(**account) for account in tenant_dict["twilio_accounts"]]
     if tenant_dict.get("openai_settings"):
@@ -287,12 +310,9 @@ def _build_new_tenant_document(tenant_request: TenantRequest) -> TenantDocument:
     _embedded_or_dropped(tenant_dict, "openai_settings", OpenAISettings)
     _embedded_or_dropped(tenant_dict, "anthropic_settings", AnthropicSettings)
     _embedded_or_dropped(tenant_dict, "google_llm_settings", GoogleLLMSettings)
-    if tenant_dict.get("platform_bot_settings"):
-        tenant_dict["platform_bot_settings"] = [
-            PlatformBotSettings(**setting) for setting in tenant_dict["platform_bot_settings"]
-        ]
     if tenant_dict.get("features"):
         tenant_dict["features"] = [FeatureTenant(**feature) for feature in tenant_dict["features"]]
+    tenant_dict["tools"] = _validated_tools(tenant_dict.get("tools"))
     return TenantDocument(**tenant_dict)
 
 
@@ -305,7 +325,7 @@ def _assign_tenant_ownership(tenant_doc: TenantDocument, user: User) -> None:
 @tenant_router.post("", response_model=TenantRequest)
 @tenant_router.put("/{tenant_name}")
 async def create_tenant(
-    tenant_request: TenantRequest,
+    tenant_request: TenantCreateRequest,
     request: Request,
     user: User = Security(verify_token_extended, scopes=["staff", "grant_access"]),
     tenant_name: Optional[str] = None,
@@ -314,10 +334,12 @@ async def create_tenant(
     This endpoint allows a staff user to create a new tenant. The tenant name is
     converted to lowercase and spaces are replaced with underscores. The name
     must be alphanumeric and may contain digits, underscores, or hyphens. If a
-    tenant with the same name already exists, an error is raised.
+    tenant with the same name already exists, an error is raised. With
+    ``owner_email`` + ``owner_password`` (POST only) the business owner's dashboard
+    login is created too (role ``user``, member of this tenant).
 
     Args:
-        tenant_request (TenantRequest): The request object containing tenant details.
+        tenant_request (TenantCreateRequest): The request object containing tenant details.
         user (User, optional): The user making the request, verified by token.
                                Defaults to Depends(verify_token).
 
@@ -342,10 +364,6 @@ async def create_tenant(
         tenant_doc = _build_new_tenant_document(tenant_request)
     messages: List[str] = []
     make_automation(tenant_doc)
-    if not CallSettingsDocument.objects(tenant_name=tenant_name).first():
-        CallSettingsDocument(tenant_name=tenant_name).save()
-    if not ChatSettingsDocument.objects(tenant_name=tenant_name).first():
-        ChatSettingsDocument(tenant_name=tenant_name).save()
     _assign_tenant_ownership(tenant_doc, user)
     try:
         tenant_doc.save()
@@ -356,6 +374,11 @@ async def create_tenant(
     update_tenant_document(tenant_name)
     ensure_default_chat_call_settings(tenant_name)
     messages.append("Tenant created successfully")
+    if request.method == "POST" and tenant_request.owner_email:
+        create_tenant_member(
+            tenant_request.owner_email, tenant_request.owner_password, tenant_doc.description or tenant_name, tenant_doc
+        )
+        messages.append(f"Owner user {tenant_request.owner_email} created")
     return JSONResponse(content={"messages": messages})
 
 
@@ -375,11 +398,11 @@ class TenantDetail(BaseModel):
     phone_numbers: List[str]
     manual_mode: Optional[bool] = False
     openai_settings: Optional[OpenAISettingsModel] = None
-    platform_bot_settings: List[PlatformBotSettingsModel] = []
     features: List[FeatureTenantModel] = []
     default_language: Optional[str] = "he"
     default_timezone: Optional[str] = DEFAULT_TIMEZONE
     owner_phone_number: Optional[str] = None
+    tools: List[str] = []
 
 
 def _collect_tenant_phone_numbers(tenant: TenantDocument) -> List[str]:
@@ -412,10 +435,6 @@ def _build_tenant_response_context(tenant: TenantDocument) -> dict:
             if tenant.google_llm_settings
             else None
         ),
-        "platform_bot_settings": [
-            PlatformBotSettingsModel(**settings.to_mongo().to_dict())
-            for settings in (tenant.platform_bot_settings or create_default_platform_settings())
-        ],
         "features": [FeatureTenantModel(**feature.to_mongo().to_dict()) for feature in tenant.features],
         "twilio_accounts": [TwilioAccountModel(**account.to_mongo().to_dict()) for account in tenant.twilio_accounts],
         "waha_accounts": (
@@ -442,12 +461,12 @@ def _build_staff_tenant_detail(tenant: TenantDocument, context: dict) -> TenantD
         waha_accounts=context["waha_accounts"],
         openai_settings=context["openai_settings"],
         features=context["features"],
-        platform_bot_settings=context["platform_bot_settings"],
         google_llm_settings=context["google_llm_settings"],
         anthropic_settings=context["anthropic_settings"],
         default_language=tenant.default_language or "he",
         default_timezone=tenant.default_timezone or DEFAULT_TIMEZONE,
         owner_phone_number=tenant.owner_phone_number or None,
+        tools=list(tenant.tools or []),
     )
 
 
@@ -466,12 +485,12 @@ def _build_customer_tenant_detail(tenant: TenantDocument, context: dict) -> Tena
         features=context["features"],
         twilio_accounts=context["twilio_accounts"],
         waha_accounts=context["waha_accounts"],
-        platform_bot_settings=context["platform_bot_settings"],
         google_llm_settings=context["google_llm_settings"],
         anthropic_settings=context["anthropic_settings"],
         default_language=tenant.default_language or "he",
         default_timezone=tenant.default_timezone or DEFAULT_TIMEZONE,
         owner_phone_number=tenant.owner_phone_number or None,
+        tools=list(tenant.tools or []),
     )
 
 
@@ -501,18 +520,3 @@ async def get_tenant(tenant_name: str, user: UserDocument = Security(verify_toke
     if tenant_name in list(user.permissions.keys()):
         return _build_customer_tenant_detail(tenant, context)
     raise HTTPException(status_code=403, detail="You do not have access to this tenant")
-
-
-@tenant_router.delete("/{tenant_name}")
-async def delete_tenant(tenant_name: str, user: User = Depends(authenticate_user_token)):
-    """
-    Deletes a tenant.
-    """
-    tenant = TenantDocument.objects(name=tenant_name).first()
-    if not tenant:
-        raise HTTPException(status_code=404, detail=TENANT_NOT_FOUND)
-    if user.is_staff or user.email == tenant.creator_email:
-        tenant.delete()
-        return JSONResponse(content={"message": "Tenant deleted successfully"})
-    else:
-        raise HTTPException(status_code=403, detail="You do not have permission to delete this tenant")

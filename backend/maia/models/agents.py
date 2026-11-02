@@ -14,7 +14,7 @@ class AgentDocument(Document):
     tenant_name = StringField(required=True)
     description = StringField()
     is_active = BooleanField(default=True)
-    model = StringField(default="gpt-4.1-mini")
+    model = StringField(default="gpt-6.1-terra")
     provider = StringField(default="openai")
     temperature = FloatField(default=0.3)
     score_threshold = FloatField(default=0.5)
@@ -56,7 +56,7 @@ class AgentCreateRequest(BaseModel):
     name: str
     description: str
     is_active: bool
-    model: str = "gpt-4.1-mini"
+    model: str = "gpt-6.1-terra"
     provider: str = "openai"
     temperature: float = 0.3
     score_threshold: float = 0.5

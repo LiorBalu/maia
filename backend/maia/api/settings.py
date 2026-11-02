@@ -56,14 +56,12 @@ async def update_chat_settings(
 
 @settings_router.get("/call/{tenant_name}", response_model=CallSettings)
 async def get_call_settings(tenant_name: str, user: User = Depends(authenticate_user_token)):
-    """Call settings of the tenant, created with the default features when missing."""
+    """Call settings of the tenant, created with the defaults when missing."""
     call_settings = CallSettingsDocument.objects(tenant_name=tenant_name).first()
     if call_settings is None:
         call_settings = CallSettingsDocument(tenant_name=tenant_name)
-        call_settings.update_all_features()
         call_settings.save()
         call_settings.reload()
-    call_settings.update_all_features()
     return call_settings
 
 

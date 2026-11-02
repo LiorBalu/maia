@@ -1,6 +1,7 @@
 """Auth API: login, dashboard users (staff / member), own profile, the OAuth2 token used by /docs."""
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -53,24 +54,55 @@ async def get_users(u: User = Depends(authenticate_user_token)):
     return JSONResponse(content=[serialize_user(user) for user in users])
 
 
+# Password policy: at least 8 characters, 1 uppercase letter, 1 special character (the frontend mirrors it).
+PASSWORD_REGEX = r'^(?=.*[A-Z])(?=.*[!@#$%^&*(),.?":{}|<>])[A-Za-z\d!@#$%^&*(),.?":{}|<>]{8,}$'
+
+
+def validate_password_policy(password: Optional[str]) -> None:
+    """400 when the password is missing or fails the policy."""
+    if not password:
+        raise HTTPException(status_code=400, detail="Password is required")
+    if not re.match(PASSWORD_REGEX, password):
+        raise HTTPException(
+            status_code=400,
+            detail="Password must contain at least 8 characters, 1 uppercase letter and 1 special character",
+        )
+
+
+def assert_email_free(email: str) -> str:
+    """The normalized email, or 400 when a dashboard user already has it."""
+    email = email.strip().lower()
+    if UserDocument.objects(email=email).first():
+        raise HTTPException(status_code=400, detail="User already exists")
+    return email
+
+
+def create_tenant_member(email: str, password: str, name: str, tenant: TenantDocument) -> UserDocument:
+    """Create a plain member (`role=user`) of one tenant and add it to the tenant's `access_users`.
+
+    Used by tenant creation ("open a business with its owner's login"); the register route below handles the
+    general case (roles, several tenants).
+    """
+    email = assert_email_free(email)
+    validate_password_policy(password)
+    user_doc = UserDocument(name=name or email, email=email, role="user", tenants_name=[tenant.name])
+    user_doc.password = generate_password_hash(password)
+    user_doc.password_last_changed_at = datetime.utcnow()
+    user_doc.save()
+    if email not in (tenant.access_users or []):
+        tenant.access_users.append(email)
+        tenant.save()
+        tenant.reload()
+    return user_doc
+
+
 def _validate_new_user_payload(user: UserRequest) -> None:
     """Reject an incomplete registration payload or a password that fails the policy."""
     if not user.name:
         raise HTTPException(status_code=400, detail="Name is required")
     if not user.email:
         raise HTTPException(status_code=400, detail="Email is required")
-    if not user.password:
-        raise HTTPException(status_code=400, detail="Password is required")
-
-    # Password validation: at least 8 characters, 1 uppercase letter, 1 special character
-    import re
-
-    password_regex = r'^(?=.*[A-Z])(?=.*[!@#$%^&*(),.?":{}|<>])[A-Za-z\d!@#$%^&*(),.?":{}|<>]{8,}$'
-    if not re.match(password_regex, user.password):
-        raise HTTPException(
-            status_code=400,
-            detail="Password must contain at least 8 characters, 1 uppercase letter and 1 special character",
-        )
+    validate_password_policy(user.password)
 
 
 def _user_document_fields(user: UserRequest) -> dict:
@@ -120,20 +152,6 @@ async def create_user(
     # await manager_engine.save(user_model)
     token = create_access_token(data=_build_user_token_data(user_doc))
     return {"token": token, "user": user}
-
-
-@router.delete("/users/{email}")
-async def delete_user(
-    email: str, u: UserDocument = Security(verify_token_extended, scopes=["staff", "grant_access"])
-):
-    """Delete a user by email (staff only)."""
-    user_instance = UserDocument.objects(email=email.lower()).first()
-    if not user_instance:
-        raise HTTPException(status_code=404, detail="User not found")
-    if not u.is_staff:
-        raise HTTPException(status_code=403, detail="User not authorized")
-    user_instance.delete()
-    return {"message": "User deleted"}
 
 
 class LoginRequest(BaseModel):
@@ -194,7 +212,7 @@ async def login_email_password(user: LoginRequest):
     user_doc.last_login = str(datetime.now(timezone.utc))
     user_doc.save()
     token = create_access_token(data=_build_user_token_data(user_doc))
-    return {"token": token, "user": user_doc.to_json(), "device_verified": True}
+    return {"token": token, "user": user_doc.to_json()}
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):

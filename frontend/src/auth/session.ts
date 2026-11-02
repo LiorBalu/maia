@@ -1,7 +1,6 @@
 import { jwtDecode } from 'jwt-decode'
 
 const TOKEN_KEY = 'maia_jwt'
-const DEVICE_KEY = 'maia_device_id'
 
 export type Role = 'staff' | 'user'
 
@@ -10,8 +9,6 @@ export interface SessionUser {
   role: Role
   isStaff: boolean
   tenants: string[]
-  permissions: Record<string, string[]>
-  exp: number
 }
 
 interface Claims {
@@ -19,7 +16,6 @@ interface Claims {
   is_staff?: boolean
   role?: Role
   tenants?: string[]
-  permissions?: Record<string, string[]>
   exp: number
 }
 
@@ -66,20 +62,8 @@ export function parseUser(token: string): SessionUser | null {
       role: claims.role ?? (isStaff ? 'staff' : 'user'),
       isStaff,
       tenants: claims.tenants ?? [],
-      permissions: claims.permissions ?? {},
-      exp: claims.exp,
     }
   } catch {
     return null
   }
-}
-
-/** The backend wants a stable device id per browser for its device checks. */
-export function getDeviceId(): string {
-  let id = safeGet(DEVICE_KEY)
-  if (!id) {
-    id = typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : String(Date.now())
-    safeSet(DEVICE_KEY, id)
-  }
-  return id
 }

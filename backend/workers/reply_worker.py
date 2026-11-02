@@ -38,7 +38,6 @@ async def reply_job(
     user_id: str,
     agent_config: dict = None,
     task_message_id: str = None,
-    single_message_mode: bool = False,
     conversation_id: str = None,
 ) -> str:
     """
@@ -51,8 +50,6 @@ async def reply_job(
         agent_config: Optional agent configuration dictionary
         task_message_id: ID of the specific MessageDocument that triggered this task.
                          Used to save the correct message to Redis even on early returns (cooldown, block AI, etc.)
-        single_message_mode: When True the Redis session_id is the message id, not the conversation id.
-                             Set by save functions that process isolated messages (web pages, email).
         conversation_id: Optional conversation ID. If provided, used directly instead of get_or_create.
     Returns:
         Response string from reply_to_message
@@ -88,7 +85,6 @@ async def reply_job(
             user_id=user_id,
             agent_config=agent_config,
             task_message_id=task_message_id,
-            single_message_mode=single_message_mode,
             conversation_id=conversation_id,
         )
 

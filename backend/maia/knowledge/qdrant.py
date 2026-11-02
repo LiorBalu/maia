@@ -22,11 +22,9 @@ from qdrant_client.models import (
 
 logger = logging.getLogger(__name__)
 
-# Qdrant configuration - supports both local and cloud
-QDRANT_URL = getenv("QDRANT_URL")  # For cloud: https://xxx.qdrant.io
-QDRANT_API_KEY = getenv("QDRANT_API_KEY")  # For cloud authentication
-QDRANT_HOST = getenv("QDRANT_HOST", "localhost")  # For local: localhost
-QDRANT_PORT = int(getenv("QDRANT_PORT", "6333"))  # For local: 6333
+# Qdrant configuration (the local container: host + port)
+QDRANT_HOST = getenv("QDRANT_HOST", "localhost")
+QDRANT_PORT = int(getenv("QDRANT_PORT", "6333"))
 
 # Cohere embed-v4.0 configuration
 COHERE_VECTOR_SIZE = 1024
@@ -37,20 +35,14 @@ _qdrant_client = None
 
 def get_qdrant_client() -> QdrantClient:
     """
-    Get configured Qdrant client (singleton pattern).
-
-    Supports both cloud (URL + API key) and local (host + port) configurations.
+    Get configured Qdrant client (singleton pattern), connected to QDRANT_HOST:QDRANT_PORT.
     """
     global _qdrant_client
 
     if _qdrant_client is None:
         try:
-            if QDRANT_URL and QDRANT_API_KEY:
-                _qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-                logger.info(f"Qdrant client initialized (Cloud): {QDRANT_URL}")
-            else:
-                _qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
-                logger.info(f"Qdrant client initialized (Local): {QDRANT_HOST}:{QDRANT_PORT}")
+            _qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+            logger.info(f"Qdrant client initialized (Local): {QDRANT_HOST}:{QDRANT_PORT}")
         except Exception as e:
             logger.error(f"Qdrant client initialization failed: {e}")
             raise

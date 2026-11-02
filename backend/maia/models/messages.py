@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 class MessageDocument(Document):
     """One message of a conversation: role (user / assistant / manager / tool / tool_calls), text, media, the
-    platform's id (sid) and meta_data (thread, sources, usage...).
+    platform's id (sid) and meta_data (thread, sources...).
     """
     tenant_name = StringField(required=False)
     platform = StringField(required=True, default="waha")
@@ -48,7 +48,7 @@ class MessageDocument(Document):
     }
 
     def to_dict(self):
-        """Message as a dict for the API, with a display name per role and the inferred channel / entity."""
+        """Message as a dict for the API, with a display name per role."""
         from bson import ObjectId
 
         def serialize_value(value):
@@ -74,11 +74,6 @@ class MessageDocument(Document):
         if self.role == "assistant":
             self.profile_name = "AI"
 
-        # Always expose channel/entity, inferring them for messages saved without a channel tag.
-        from maia.utils.channels import infer_channel
-
-        channel_info = infer_channel(self.platform, self.role, self.meta_data)
-
         return {
             "id": str(self.id),
             "tenant_name": self.tenant_name,
@@ -95,15 +90,12 @@ class MessageDocument(Document):
             "to": self.to,
             "msg_type": self.msg_type,
             "media_url": self.media_url,
-            "channel": channel_info["channel"],
-            "entity": channel_info["entity"],
             "meta_data": serialize_value(self.meta_data),
         }
 
     def save(self, *args, **kwargs):
         """Attach the message to the customer's online conversation of its platform (created when missing), then
-        update the conversation: last message date, unread + unresolved on a user message, read on a manager
-        message.
+        update the conversation: last message date, unread on a user message, read on a manager message.
         """
         self.date = self.date if self.date else datetime.now(timezone.utc)
 
@@ -160,8 +152,6 @@ class MessageDocument(Document):
                 conv.last_message_date = self.date
             # Reset read_by_manager to False when a new customer message arrives
             if self.role == "user":
-                if conv.resolution_status != "unresolved":
-                    conv.resolution_status = "unresolved"
                 conv.read_by_manager = False
             # Set read_by_manager to True when manager sends a message
             elif self.role == "manager":

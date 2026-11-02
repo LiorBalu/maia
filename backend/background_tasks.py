@@ -1,13 +1,12 @@
 """Celery application of Maia: knowledge indexing (document parts, URL scraping, Cohere embeddings), Gmail watch
-renewal, SSE cleanup and the deferred WAHA disconnect check.
+renewal and the deferred WAHA disconnect check.
 """
 
-import asyncio
 import logging
 from os import getenv
 
 import redis
-from celery import Celery, signals
+from celery import Celery
 from celery.schedules import crontab
 
 
@@ -34,69 +33,6 @@ try:
     logger.info("Tools auto-discovery completed successfully")
 except Exception as e:
     logger.error(f"Error during tools auto-discovery: {e}")
-
-
-# Filter to suppress verbose Celery task logs
-class CeleryTaskFilter(logging.Filter):
-    """Filter out INFO logs for specific repetitive Celery tasks"""
-
-    FILTERED_TASKS: list[str] = []
-
-    def filter(self, record):
-        # Only filter INFO level messages
-        """Drop INFO lines that mention one of FILTERED_TASKS; keep every other record."""
-        if record.levelno != logging.INFO:
-            return True
-
-        message = record.getMessage()
-
-        # Filter out "Task X received", "Task X succeeded", and task IDs for filtered tasks
-        for task_name in self.FILTERED_TASKS:
-            if task_name in message:
-                # Uncomment for debugging: print(f"🔇 Filtering: {message}")
-                return False
-
-        return True
-
-
-# Apply filter to ALL Celery-related loggers
-celery_task_filter = CeleryTaskFilter()
-
-# Root celery logger - this should catch everything
-celery_root = logging.getLogger("celery")
-celery_root.addFilter(celery_task_filter)
-
-# Specific sub-loggers
-for logger_name in [
-    "celery.app",
-    "celery.app.trace",
-    "celery.worker",
-    "celery.worker.strategy",
-    "celery.worker.consumer",
-]:
-    sub_logger = logging.getLogger(logger_name)
-    sub_logger.addFilter(celery_task_filter)
-
-
-# Signal to ensure filters are applied after worker is ready
-@signals.worker_ready.connect
-def setup_logging_filters(**kwargs):
-    """Re-apply logging filters after worker is initialized"""
-    celery_task_filter = CeleryTaskFilter()
-    for logger_name in [
-        "celery",
-        "celery.app",
-        "celery.app.trace",
-        "celery.worker",
-        "celery.worker.strategy",
-        "celery.worker.consumer",
-    ]:
-        logger_instance = logging.getLogger(logger_name)
-        # Remove existing filters of the same type
-        logger_instance.filters = [f for f in logger_instance.filters if not isinstance(f, CeleryTaskFilter)]
-        # Add our filter
-        logger_instance.addFilter(celery_task_filter)
-    logger.info("Celery task filters applied successfully")
 
 
 REDIS_URL = getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -200,57 +136,13 @@ def index_url_task(
     scrape_url_and_embed(document_id, url, max_depth, max_pages, same_domain_only)
 
 
-@celery_app.task
-def cleanup_sse_connections_task():
-    """
-    Periodic cleanup of inactive SSE connections via Redis.
-    Runs every 5 minutes via Celery Beat instead of asyncio loop.
-    """
-
-    async def _cleanup():
-        """Async body of the task: reconnect the SSE manager if needed, drop connections idle for more than 10
-        minutes, log the count left.
-        """
-        from maia.api.sse_manager import redis_sse_manager
-
-        try:
-            # Ensure Redis is connected
-            if not await redis_sse_manager.is_healthy():
-                await redis_sse_manager.initialize()
-
-            # Clean up inactive connections (older than 10 minutes)
-            await redis_sse_manager.cleanup_inactive_connections(max_age_minutes=10)
-
-            # Get stats for logging
-            debug_info = await redis_sse_manager.get_debug_info()
-            active_connections = debug_info.get("total_connections", 0)
-
-            if active_connections > 0:
-                logger.info(f"SSE Cleanup: {active_connections} active connections remaining")
-        except Exception as e:
-            logger.error(f"Error in SSE cleanup task: {e}")
-
-    # Run the async cleanup
-    try:
-        asyncio.run(_cleanup())
-    except Exception as e:
-        logger.error(f"Failed to run SSE cleanup: {e}")
-
-
 celery_app.conf.beat_schedule = {
     "renew_gmail_watches_every_3_days": {
         "task": "background_tasks.renew_gmail_watches_task",
         # Fixed days of month every ~3 days — immune to worker restarts
         "schedule": crontab(hour=3, minute=0, day_of_month="1,4,7,10,13,16,19,22,25,28"),
     },
-    "cleanup_sse_connections_every_5_minutes": {
-        "task": "background_tasks.cleanup_sse_connections_task",
-        "schedule": 60 * 5,  # 300 seconds = 5 minutes
-    },
 }
-
-
-        # Don't raise - broadcast failures should not fail the main operation
 
 
 @celery_app.task
@@ -292,12 +184,10 @@ def embed_chunk_task(
                     vector=embedding_vector,
                     payload={
                         "page_content": content,
-                        "content": content,
                         "part_number": part_number,
                         "document_id": document_id,
                         "tenant_name": tenant_name,
                         "categories": categories,
-                        "rag_category": categories[0] if categories else "",
                         "is_private": is_private,
                     },
                 )

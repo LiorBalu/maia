@@ -29,7 +29,6 @@ class SaveResponse:
     delay: Optional[int] = None
     user_id: Optional[str] = None
     task_message_id: Optional[str] = None
-    single_message_mode: bool = False
     conversation_id: Optional[str] = None
 
 
