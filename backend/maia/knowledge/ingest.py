@@ -2,6 +2,7 @@
 
 
 import logging
+from pathlib import Path
 from typing import Any, Dict
 
 # LangChain 1.0 imports - functions moved to langchain_classic
@@ -12,24 +13,114 @@ from langchain_community.document_loaders import (
 )
 from langchain_core.documents import Document as LangchainDocument
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from maia.models.knowledge_documents import EmbeddedDocument, EmbeddedPart
 from maia.knowledge.qdrant import (
-    COHERE_VECTOR_SIZE,
-    doc_point_id,
-    docs_collection_name,
-    ensure_documents_collection,
-    get_qdrant_client,
+    COHERE_EMBEDDING_DIMENSIONS,
+    derive_document_part_point_id,
+    derive_tenant_documents_collection_name,
+    ensure_tenant_documents_collection,
+    ensure_qdrant_client,
 )
-from maia.utils.read_csv import read_csv
-from maia.utils.read_pdf import read_pdf
-from maia.utils.read_word import read_word
-from maia.utils.read_xlsx import read_xlsx
+from maia.utils.read_csv import extract_text_from_csv
+from maia.utils.read_pdf import extract_text_from_pdf
+from maia.utils.read_word import extract_text_from_word
+from maia.utils.read_xlsx import extract_text_from_xlsx
 
 logger = logging.getLogger(__name__)
 
 
-def load_document_with_langchain(file_path_or_url: str) -> str:
+def _load_text_with_loader(loader) -> str:
+    """Run a LangChain document loader and join the page_content of the documents it returns with a blank line."""
+    loaded_documents = loader.load()
+    return "\n\n".join([loaded_document.page_content for loaded_document in loaded_documents])
+
+
+def _load_web_page_text(url: str) -> str | None:
+    """
+    The text of a web page loaded with LangChain's WebBaseLoader ("" is a valid result).
+
+    Returns None, after logging the error, when WebBaseLoader fails: the caller then downloads the URL as a file.
+    """
+    from langchain_community.document_loaders import WebBaseLoader
+
+    try:
+        logger.info(f"Loading web page: {url}")
+        web_page_loader = WebBaseLoader(url)
+        page_text = _load_text_with_loader(web_page_loader)
+        logger.info(f"Successfully loaded {len(page_text)} characters from web page")
+        return page_text
+    except Exception as error:
+        logger.error(f"WebBaseLoader failed, trying standard download: {error}")
+        return None
+
+
+def _download_url_to_temp_file(url: str, file_extension: str) -> str:
+    """
+    Download the URL into a named temporary file ending with file_extension and return the file's path.
+
+    The file is created with delete=False and is never removed.
+    """
+    import tempfile
+
+    import requests
+
+    # Download file from URL
+    download_response = requests.get(url)
+    download_response.raise_for_status()
+
+    # Save to temp file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
+        temp_file.write(download_response.content)
+        local_path = temp_file.name
+    return local_path
+
+
+def _extract_text_by_extension(source_path_or_url: str, local_path: str) -> str:
+    """
+    Extract the text with the reader or LangChain loader that matches the suffix of local_path.
+
+    The PDF, Word, Excel and CSV readers receive source_path_or_url (they download a URL themselves); the
+    LangChain loaders read local_path. A legacy .doc raises ValueError; every error is logged and re-raised.
+    """
+    # Get file extension
+    file_extension = Path(local_path).suffix.lower()
+
+    try:
+        # Choose loader based on file extension
+        if file_extension == ".pdf":
+            return extract_text_from_pdf(source_path_or_url)
+        elif file_extension == ".docx":
+            return extract_text_from_word(source_path_or_url)
+        elif file_extension == ".doc":
+            # python-docx reads only the Office Open XML format; the dashboard no longer offers .doc.
+            raise ValueError("Legacy .doc files are not supported; save the file as .docx")
+        elif file_extension in [".xlsx", ".xls"]:
+            return extract_text_from_xlsx(source_path_or_url)
+        elif file_extension == ".csv":
+            return extract_text_from_csv(source_path_or_url)
+        elif file_extension in [".pptx", ".ppt"]:
+            document_loader = UnstructuredPowerPointLoader(local_path)
+        elif file_extension in [".txt", ".md"]:
+            document_loader = TextLoader(local_path)
+        elif file_extension in [".html", ".htm"]:
+            # For local HTML files
+            document_loader = TextLoader(local_path)
+        else:
+            # Fallback: Universal loader for any file type
+            logger.info(f"Using universal loader for {file_extension}")
+            document_loader = UnstructuredFileLoader(local_path)
+
+        # Load and extract text
+        return _load_text_with_loader(document_loader)
+
+    except Exception as error:
+        logger.error(f"Error loading document with Langchain: {error}")
+        raise
+
+
+def extract_text_from_path_or_url(file_path_or_url: str) -> str:
     """
     Load document content by file extension or URL type.
     Supports: PDF, DOCX, TXT, XLSX, XLS, CSV (the dashboard's upload types), PPTX, HTML (web pages), and more.
@@ -40,292 +131,293 @@ def load_document_with_langchain(file_path_or_url: str) -> str:
     Returns:
         Extracted text content from the document
     """
-    import tempfile
-    from pathlib import Path
-
-    import requests
-    from langchain_community.document_loaders import WebBaseLoader
-
     # Check if it's a web URL (HTML page)
     if file_path_or_url.startswith(("http://", "https://")):
         # Get file extension from URL
-        file_ext = Path(file_path_or_url).suffix.lower()
+        file_extension = Path(file_path_or_url).suffix.lower()
 
         # If no file extension or common web extensions, treat as HTML
-        if not file_ext or file_ext in [".html", ".htm", ".php", ".asp", ".aspx", ""]:
-            try:
-                logger.info(f"Loading web page: {file_path_or_url}")
-                loader = WebBaseLoader(file_path_or_url)
-                documents = loader.load()
-                content = "\n\n".join([doc.page_content for doc in documents])
-                logger.info(f"Successfully loaded {len(content)} characters from web page")
-                return content
-            except Exception as e:
-                logger.error(f"WebBaseLoader failed, trying standard download: {e}")
-                # Fall through to download as file
+        if not file_extension or file_extension in [".html", ".htm", ".php", ".asp", ".aspx", ""]:
+            page_text = _load_web_page_text(file_path_or_url)
+            if page_text is not None:
+                return page_text
+            # Fall through to download as file
 
-        # Download file from URL
-        response = requests.get(file_path_or_url)
-        response.raise_for_status()
-
-        # Save to temp file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
-            tmp_file.write(response.content)
-            file_path = tmp_file.name
+        local_path = _download_url_to_temp_file(file_path_or_url, file_extension)
     else:
-        file_path = file_path_or_url
+        local_path = file_path_or_url
 
-    # Get file extension
-    file_ext = Path(file_path).suffix.lower()
-
-    try:
-        # Choose loader based on file extension
-        if file_ext == ".pdf":
-            return read_pdf(file_path_or_url)
-        elif file_ext == ".docx":
-            return read_word(file_path_or_url)
-        elif file_ext == ".doc":
-            # python-docx reads only the Office Open XML format; the dashboard no longer offers .doc.
-            raise ValueError("Legacy .doc files are not supported; save the file as .docx")
-        elif file_ext in [".xlsx", ".xls"]:
-            return read_xlsx(file_path_or_url)
-        elif file_ext == ".csv":
-            return read_csv(file_path_or_url)
-        elif file_ext in [".pptx", ".ppt"]:
-            loader = UnstructuredPowerPointLoader(file_path)
-        elif file_ext in [".txt", ".md"]:
-            loader = TextLoader(file_path)
-        elif file_ext in [".html", ".htm"]:
-            # For local HTML files
-            loader = TextLoader(file_path)
-        else:
-            # Fallback: Universal loader for any file type
-            logger.info(f"Using universal loader for {file_ext}")
-            loader = UnstructuredFileLoader(file_path)
-
-        # Load and extract text
-        documents = loader.load()
-        content = "\n\n".join([doc.page_content for doc in documents])
-
-        return content
-
-    except Exception as e:
-        logger.error(f"Error loading document with Langchain: {e}")
-        # Fallback to original read_pdf if available
-        raise
+    return _extract_text_by_extension(file_path_or_url, local_path)
 
 
-def create_embedding_parts_for_document(document_id: str):
+def _delete_existing_parts(knowledge_document_id: str) -> None:
+    """Delete the EmbeddedPart records a previous indexing left for this knowledge document, logging how many."""
+    stale_parts_count = EmbeddedPart.objects(document_id=str(knowledge_document_id)).count()
+    if stale_parts_count > 0:
+        logger.info(f" Deleting {stale_parts_count} existing parts...")
+        EmbeddedPart.objects(document_id=str(knowledge_document_id)).delete()
+
+
+def _resolve_document_text(knowledge_doc: EmbeddedDocument) -> str | None:
     """
-    Split document into parts and create embeddings using Cohere.
+    The text to index: the document's stored content first, else the text loaded from its URL.
+
+    Returns None when there is nothing to index (loading the URL failed, or the document has neither content nor
+    URL); an empty text loaded from the URL is returned as is.
     """
-    document = EmbeddedDocument.objects(id=document_id).first()
-    if not document:
-        logger.warning(f"Document {document_id} not found")
-        return
-
-    # Delete existing parts for this document
-    existing_parts_count = EmbeddedPart.objects(document_id=str(document_id)).count()
-    if existing_parts_count > 0:
-        logger.info(f" Deleting {existing_parts_count} existing parts...")
-        EmbeddedPart.objects(document_id=str(document_id)).delete()
-
     # Load document content
-    if document.content:
+    if knowledge_doc.content:
         # Prefer existing content (e.g., from web scraping)
-        logger.info(f"Using existing content ({len(document.content)} characters)")
-        content = document.content
-    elif document.url:
+        logger.info(f"Using existing content ({len(knowledge_doc.content)} characters)")
+        return knowledge_doc.content
+    elif knowledge_doc.url:
         # Load from URL using Langchain (supports multiple formats)
-        logger.info(f"Loading document from URL: {document.url}")
+        logger.info(f"Loading document from URL: {knowledge_doc.url}")
         try:
-            content = load_document_with_langchain(document.url)
-        except Exception as e:
-            logger.error(f"Error loading with Langchain: {e}")
-            return
+            return extract_text_from_path_or_url(knowledge_doc.url)
+        except Exception as error:
+            logger.error(f"Error loading with Langchain: {error}")
+            return None
     else:
-        logger.info(f"No content or URL found for document {document_id}")
-        return
+        logger.info(f"No content or URL found for document {knowledge_doc.id}")
+        return None
 
+
+def _split_text_into_chunks(knowledge_doc: EmbeddedDocument, document_text: str) -> list[LangchainDocument]:
+    """
+    Wrap the text in a LangChain document (metadata: document_id, tenant_name, title)
+    and split it into chunks of up to 1000 characters with a 200-character overlap.
+    """
     # Create a Langchain Document
-    doc_categories = [c for c in (document.categories or []) if c]
-    langchain_doc = LangchainDocument(
-        page_content=content,
+    source_document = LangchainDocument(
+        page_content=document_text,
         metadata={
-            "document_id": str(document.id),
-            "tenant_name": document.tenant_name,
-            "title": document.title,
-            "categories": doc_categories,
+            "document_id": str(knowledge_doc.id),
+            "tenant_name": knowledge_doc.tenant_name,
+            "title": knowledge_doc.title,
         },
     )
 
     # Split into chunks
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    docs = text_splitter.split_documents([langchain_doc])
+    chunk_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    chunks = chunk_splitter.split_documents([source_document])
 
-    logger.info(f"Document split into {len(docs)} chunks")
+    logger.info(f"Document split into {len(chunks)} chunks")
+    return chunks
 
+
+def _reset_document_for_reindex(knowledge_doc: EmbeddedDocument, part_count: int) -> None:
+    """Clear the document's stored content, mark it not indexed, record its new part count and save it."""
     # Update document metadata (without parts to avoid size limit)
-    document.content = ""  # Clear content to save space
-    document.is_indexed = False
-    document.total_parts = len(docs)  # Store count for reference
-    document.save()
+    knowledge_doc.content = ""  # Clear content to save space
+    knowledge_doc.is_indexed = False
+    knowledge_doc.total_parts = part_count  # Store count for reference
+    knowledge_doc.save()
 
+
+def _persist_chunks_as_parts(knowledge_doc: EmbeddedDocument, chunks: list[LangchainDocument]) -> None:
+    """Save one EmbeddedPart per chunk, numbered from 0, with the part's deterministic Qdrant point id as vector_id."""
     # Save each part individually to avoid document size limit
-    logger.info(f"Saving {len(docs)} parts to MongoDB...")
-    for idx, doc in enumerate(docs):
-        vector_id = doc_point_id(str(document.id), idx)
+    logger.info(f"Saving {len(chunks)} parts to MongoDB...")
+    for part_index, chunk in enumerate(chunks):
+        point_id = derive_document_part_point_id(str(knowledge_doc.id), part_index)
 
-        embedded_part = EmbeddedPart(
-            part_number=idx,
-            content=doc.page_content,
-            vector_id=vector_id,
+        part_record = EmbeddedPart(
+            part_number=part_index,
+            content=chunk.page_content,
+            vector_id=point_id,
             vector_for_backup=None,
-            document_id=str(document.id),
-            tenant_name=document.tenant_name,
+            document_id=str(knowledge_doc.id),
+            tenant_name=knowledge_doc.tenant_name,
         )
-        embedded_part.save()  # Save each part independently
-        logger.info(f"  Part {idx + 1}/{len(docs)} saved")
+        part_record.save()  # Save each part independently
+        logger.info(f"  Part {part_index + 1}/{len(chunks)} saved")
 
-    logger.info(f"Document {document_id} split into {len(docs)} parts and saved to MongoDB")
+
+def index_knowledge_document(knowledge_document_id: str):
+    """
+    Split document into parts and create embeddings using Cohere.
+    """
+    knowledge_doc = EmbeddedDocument.objects(id=knowledge_document_id).first()
+    if not knowledge_doc:
+        logger.warning(f"Document {knowledge_document_id} not found")
+        return
+
+    # Delete existing parts for this document
+    _delete_existing_parts(knowledge_document_id)
+
+    document_text = _resolve_document_text(knowledge_doc)
+    if document_text is None:
+        return
+
+    chunks = _split_text_into_chunks(knowledge_doc, document_text)
+    _reset_document_for_reindex(knowledge_doc, len(chunks))
+    _persist_chunks_as_parts(knowledge_doc, chunks)
+
+    logger.info(f"Document {knowledge_document_id} split into {len(chunks)} parts and saved to MongoDB")
     logger.info("Now creating Cohere embeddings...")
 
-    create_embeddings_for_parts(document_id)
+    schedule_part_indexing_tasks(knowledge_document_id)
 
 
-def create_embeddings_for_parts(document_id: str):
+def _build_document_points_filter(knowledge_document_id: str) -> Filter:
+    """The Qdrant filter that selects the points of one knowledge document (payload key document_id)."""
+    return Filter(must=[FieldCondition(key="document_id", match=MatchValue(value=knowledge_document_id))])
+
+
+def _clear_document_points(qdrant_client, collection_name: str, knowledge_document_id: str) -> None:
+    """Delete this document's points from the tenant's shared collection; a failure is logged, not raised."""
+    # Re-indexing a document must be clean: drop only THIS document's existing
+    # points (deterministic ids are overwritten on upsert anyway, but a re-split
+    # can change the part count, leaving stale tail parts otherwise).
+    try:
+        qdrant_client.delete(
+            collection_name=collection_name,
+            points_selector=_build_document_points_filter(knowledge_document_id),
+        )
+    except Exception as error:
+        logger.error(f"Could not clear previous points for document {knowledge_document_id}: {error}")
+
+
+def _dispatch_embedding_chord(knowledge_doc: EmbeddedDocument, part_records, collection_name: str) -> tuple[int, Any]:
+    """
+    Schedule one Celery embedding task per part as a chord whose callback marks the document indexed once every
+    part is done.
+
+    Returns:
+        (part_count, chord_result): the number of parts (counted once here) and the chord's AsyncResult
+    """
+    # Import Celery tasks
+    from celery import chord
+
+    from background_tasks import index_document_part_task, mark_knowledge_document_indexed_task
+
+    # Prepare task arguments
+    part_count = part_records.count()
+    logger.info(f"Creating {part_count} Cohere embedding tasks...")
+
+    # Create tasks for each part
+    embed_signatures = []
+    for part_record in part_records:
+        embed_signature = index_document_part_task.s(
+            knowledge_document_id=str(knowledge_doc.id),
+            embedded_part_id=str(part_record.id),
+            part_number=part_record.part_number,
+            part_text=part_record.content,
+            tenant_name=knowledge_doc.tenant_name,
+            collection_name=collection_name,
+        )
+        embed_signatures.append(embed_signature)
+
+    # Execute all tasks in parallel with a callback when all complete
+    # Use chord: when all tasks finish, call the callback
+    finalize_signature = mark_knowledge_document_indexed_task.s(str(knowledge_doc.id))
+    chord_result = chord(embed_signatures)(finalize_signature)
+    return part_count, chord_result
+
+
+def schedule_part_indexing_tasks(knowledge_document_id: str):
     """
     Create Cohere embeddings for all parts of a document using Celery tasks for parallel processing.
     Uses Cohere embed-v4.0 with int8 quantization.
     """
-    document = EmbeddedDocument.objects(id=document_id).first()
-    if not document:
-        logger.warning(f"Document {document_id} not found")
+    knowledge_doc = EmbeddedDocument.objects(id=knowledge_document_id).first()
+    if not knowledge_doc:
+        logger.warning(f"Document {knowledge_document_id} not found")
         return
 
-    parts = EmbeddedPart.objects(document_id=str(document_id)).order_by("part_number")
+    part_records = EmbeddedPart.objects(document_id=str(knowledge_document_id)).order_by("part_number")
 
-    if not parts:
-        logger.warning(f"No parts found for document {document_id}. Run create_embedding_parts_for_document first.")
+    if not part_records:
+        logger.warning(f"No parts found for document {knowledge_document_id}. Run index_knowledge_document first.")
         return
 
     # Use centralized Qdrant client
-    client = get_qdrant_client()
+    qdrant_client = ensure_qdrant_client()
 
     # Shared per-tenant collection. Create it (with payload indexes) if missing;
     # never drop it — it holds every other document in the tenant.
-    collection_name = ensure_documents_collection(client, document.tenant_name)
+    collection_name = ensure_tenant_documents_collection(qdrant_client, knowledge_doc.tenant_name)
 
-    # Re-indexing a document must be clean: drop only THIS document's existing
-    # points (deterministic ids are overwritten on upsert anyway, but a re-split
-    # can change the part count, leaving stale tail parts otherwise).
-    from qdrant_client.models import FieldCondition, Filter, MatchValue
+    _clear_document_points(qdrant_client, collection_name, str(knowledge_doc.id))
 
-    try:
-        client.delete(
-            collection_name=collection_name,
-            points_selector=Filter(must=[FieldCondition(key="document_id", match=MatchValue(value=str(document.id)))]),
-        )
-    except Exception as e:
-        logger.error(f"Could not clear previous points for document {document.id}: {e}")
+    part_count, chord_result = _dispatch_embedding_chord(knowledge_doc, part_records, collection_name)
 
-    # Import Celery tasks
-    from celery import chord
-
-    from background_tasks import embed_chunk_task, mark_document_indexed_task
-
-    # Prepare task arguments
-    total_parts = parts.count()
-    logger.info(f"Creating {total_parts} Cohere embedding tasks...")
-
-    # Create tasks for each part
-    task_group = []
-    for embedded_part in parts:
-        task = embed_chunk_task.s(
-            document_id=str(document.id),
-            part_id=str(embedded_part.id),
-            part_number=embedded_part.part_number,
-            content=embedded_part.content,
-            tenant_name=document.tenant_name,
-            collection_name=collection_name,
-        )
-        task_group.append(task)
-
-    # Execute all tasks in parallel with a callback when all complete
-    # Use chord: when all tasks finish, call the callback
-    callback = mark_document_indexed_task.s(str(document.id))
-    job = chord(task_group)(callback)
-
-    logger.info(f"{total_parts} Cohere embedding tasks scheduled. Processing in background...")
+    logger.info(f"{part_count} Cohere embedding tasks scheduled. Processing in background...")
     logger.info("Document will be marked as indexed when all tasks complete")
 
     # Keep is_indexed as False until all tasks complete
-    document.is_indexed = False
-    document.save()
+    knowledge_doc.is_indexed = False
+    knowledge_doc.save()
 
     return {
         "status": "processing",
-        "total_parts": total_parts,
-        "task_group_id": job.id,
+        "total_parts": part_count,
+        "task_group_id": chord_result.id,
         "embedding_model": "cohere-embed-v4.0",
-        "vector_dimensions": COHERE_VECTOR_SIZE,
+        "vector_dimensions": COHERE_EMBEDDING_DIMENSIONS,
     }
 
 
-def get_embedding_progress(document_id: str) -> Dict[str, Any]:
+def _count_embedded_points(collection_name: str, knowledge_document_id: str) -> int:
+    """
+    The exact number of this document's points in the tenant's shared collection; 0, after logging the error, when
+    the count fails (e.g. the collection does not exist yet).
+    """
+    try:
+        qdrant_client = ensure_qdrant_client()
+        point_count_result = qdrant_client.count(
+            collection_name=collection_name,
+            count_filter=_build_document_points_filter(str(knowledge_document_id)),
+            exact=True,
+        )
+        return point_count_result.count
+
+    except Exception as error:
+        # If collection doesn't exist yet, 0 embeddings
+        logger.error(f"Collection not ready yet: {error}")
+        return 0
+
+
+def compute_indexing_progress(knowledge_document_id: str) -> Dict[str, Any]:
     """
     Check the progress of embedding creation for a document.
 
     Args:
-        document_id: ID of the document
+        knowledge_document_id: ID of the document
 
     Returns:
         Dict with progress information
     """
-    document = EmbeddedDocument.objects(id=document_id).first()
-    if not document:
+    knowledge_doc = EmbeddedDocument.objects(id=knowledge_document_id).first()
+    if not knowledge_doc:
         return {"error": "Document not found"}
 
-    parts = EmbeddedPart.objects(document_id=str(document_id))
-    total_parts = parts.count()
+    part_records = EmbeddedPart.objects(document_id=str(knowledge_document_id))
+    part_count = part_records.count()
 
     # If already indexed, no need to check Qdrant
-    if document.is_indexed:
+    if knowledge_doc.is_indexed:
         return {
-            "document_id": document_id,
-            "total_parts": total_parts,
-            "completed_parts": total_parts,
+            "document_id": knowledge_document_id,
+            "total_parts": part_count,
+            "completed_parts": part_count,
             "progress_percentage": 100.0,
             "is_indexed": True,
             "status": "completed",
         }
 
     # Count this document's points inside the shared per-tenant collection.
-    collection_name = docs_collection_name(document.tenant_name)
+    collection_name = derive_tenant_documents_collection_name(knowledge_doc.tenant_name)
+    embedded_part_count = _count_embedded_points(collection_name, knowledge_document_id)
 
-    try:
-        from qdrant_client.models import FieldCondition, Filter, MatchValue
-
-        client = get_qdrant_client()
-        count_result = client.count(
-            collection_name=collection_name,
-            count_filter=Filter(must=[FieldCondition(key="document_id", match=MatchValue(value=str(document_id)))]),
-            exact=True,
-        )
-        completed_parts = count_result.count
-
-    except Exception as e:
-        # If collection doesn't exist yet, 0 embeddings
-        logger.error(f"Collection not ready yet: {e}")
-        completed_parts = 0
-
-    progress_percentage = (completed_parts / total_parts * 100) if total_parts > 0 else 0
+    progress_percent = (embedded_part_count / part_count * 100) if part_count > 0 else 0
 
     return {
-        "document_id": document_id,
-        "total_parts": total_parts,
-        "completed_parts": completed_parts,
-        "progress_percentage": round(progress_percentage, 2),
-        "is_indexed": document.is_indexed,
-        "status": "completed" if completed_parts == total_parts else "processing",
+        "document_id": knowledge_document_id,
+        "total_parts": part_count,
+        "completed_parts": embedded_part_count,
+        "progress_percentage": round(progress_percent, 2),
+        "is_indexed": knowledge_doc.is_indexed,
+        "status": "completed" if embedded_part_count == part_count else "processing",
     }

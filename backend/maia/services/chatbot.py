@@ -8,7 +8,7 @@ from maia.models.tenants import OpenAISettingsModel
 
 logger = logging.getLogger(__name__)
 
-OPENAI_REALTIME_WS_BASE_URL = "wss://api.openai.com/v1/realtime"
+OPENAI_REALTIME_WEBSOCKET_BASE_URL = "wss://api.openai.com/v1/realtime"
 
 
 class ChatbotService:
@@ -22,6 +22,6 @@ class ChatbotService:
         self.openai_settings = openai_settings
 
     @staticmethod
-    def realtime_ws_url(model: str) -> str:
+    def build_realtime_websocket_url(realtime_model_name: str) -> str:
         """WebSocket URL of the OpenAI Realtime API for a model."""
-        return f"{OPENAI_REALTIME_WS_BASE_URL}?model={model}"
+        return f"{OPENAI_REALTIME_WEBSOCKET_BASE_URL}?model={realtime_model_name}"

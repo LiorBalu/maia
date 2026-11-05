@@ -3,9 +3,9 @@
 Two things live here, and every stage of the pipeline imports them:
 
 - ``MessageContext`` — everything the pipeline knows about one inbound message. It is built once
-  per message (``maia/inbound/reply.py::build_message_context`` for chat platforms,
-  ``maia/voice/normalize_call.py::normalize_call_data`` for the Twilio Voice webhook,
-  ``maia/voice/media_stream.py::build_message_context`` for the Realtime call session) and then
+  per message (``maia/inbound/reply.py::build_chat_message_context`` for chat platforms,
+  ``maia/voice/normalize_call.py::build_call_message_context`` for the Twilio Voice webhook,
+  ``maia/voice/media_stream.py::build_realtime_message_context`` for the Realtime call session) and then
   mutated in place by the business handler (``tenants/<folder>/handling.py``) and by the tools.
 - The flow-control exceptions below. They are raised on purpose to jump to the next phase of the
   pipeline; none of them is an error.
@@ -22,7 +22,7 @@ from maia.models.settings import ChatSettingsDocument
 class ReplyReady(Exception):
     """The reply text is ready: raised with the answer, caught by the send phase.
 
-    ``raise ReplyReady(answer)`` is the SUCCESS path of ``reply_to_message``; the whole
+    ``raise ReplyReady(answer)`` is the SUCCESS path of ``run_reply_pipeline``; the whole
     send phase lives in ``except ReplyReady``. Tools and business handlers may raise it too, to
     send a fixed text instead of a generated one. An empty answer means "send nothing".
     """
@@ -57,7 +57,7 @@ class MessageContext(TypedDict):
       ``subject``, ``call_sid``, ``should_reply_after_process``...).
 
     Tools (filled by the business handler, consumed by the tool adapters):
-    - ``tool_names``: names of the ``@gpt_tool`` functions bound to the model for this message.
+    - ``tool_names``: names of the ``@llm_tool`` functions bound to the model for this message.
     - ``tool_schemas``: ready-made tool schemas for the Realtime session (phone).
     - ``tool_results``: ``tool_call_id`` → result, so the tool messages can be saved.
     """

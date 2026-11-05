@@ -18,56 +18,60 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def generate_tool_response(request, tool_call):
+def build_tool_response_message(message_context, requested_tool_call):
     """OpenAI-style tool message ({role: tool, content, tool_call_id}) from the stored result of the call."""
     return {
         "role": "tool",
-        "content": [{"type": "text", "text": request["tool_results"][tool_call.id]}],
-        "tool_call_id": tool_call.id,
+        "content": [{"type": "text", "text": message_context["tool_results"][requested_tool_call.id]}],
+        "tool_call_id": requested_tool_call.id,
     }
 
 
-def save_tool_response(request, tool_chat_response):
+def _persist_conversation_message(message_context, role, payload, meta_data=None):
+    """Save one message of the conversation: the given role, the payload as JSON text and its meta_data (None
+    leaves the field's default, an empty dict).
+    """
+    MessageDocument(
+        phone_number=message_context["sender_id"],
+        tenant_name=message_context["tenant_name"],
+        role=role,
+        message=json.dumps(payload, ensure_ascii=False),
+        conversation_id=str(message_context["conversation"].id),
+        date=datetime.now(timezone.utc),
+        platform=message_context["platform"],
+        meta_data=meta_data,
+    ).save()
+
+
+def record_tool_response_in_conversation(message_context, tool_response_message):
     """Save the tool's response as a role=tool message of the conversation."""
-    MessageDocument(
-        phone_number=request["sender_id"],
-        tenant_name=request["tenant_name"],
-        role="tool",
-        message=json.dumps(tool_chat_response, ensure_ascii=False),
-        conversation_id=str(request["conversation"].id),
-        date=datetime.now(timezone.utc),
-        platform=request["platform"],
+    _persist_conversation_message(
+        message_context,
+        "tool",
+        tool_response_message,
         meta_data={
-            "tool_call_id": tool_chat_response["tool_call_id"],
-            "tool_call_name": tool_chat_response["content"][0]["text"],
+            "tool_call_id": tool_response_message["tool_call_id"],
+            "tool_call_name": tool_response_message["content"][0]["text"],
             "tool_call_type": "function",
-            "tool_call_arguments": tool_chat_response["content"][0]["text"],
+            "tool_call_arguments": tool_response_message["content"][0]["text"],
         },
-    ).save()
+    )
 
 
-def save_tool_call_payload(request, tool_call_payload):
+def record_tool_call_in_conversation(message_context, assistant_tool_call_message):
     """Save the assistant's tool request as a role=tool_calls message of the conversation."""
-    MessageDocument(
-        phone_number=request["sender_id"],
-        tenant_name=request["tenant_name"],
-        role="tool_calls",
-        message=json.dumps(tool_call_payload, ensure_ascii=False),
-        conversation_id=str(request["conversation"].id),
-        date=datetime.now(timezone.utc),
-        platform=request["platform"],
-    ).save()
+    _persist_conversation_message(message_context, "tool_calls", assistant_tool_call_message)
 
 
-def generate_tool_call_payload(tool_call):
+def build_assistant_tool_call_message(requested_tool_call):
     """OpenAI-style assistant message carrying one tool call (id, name, arguments)."""
     return {
         "role": "assistant",
         "tool_calls": [
             {
-                "id": tool_call.id,
+                "id": requested_tool_call.id,
                 "type": "function",
-                "function": {"name": tool_call.function.name, "arguments": tool_call.function.arguments},
+                "function": {"name": requested_tool_call.function.name, "arguments": requested_tool_call.function.arguments},
             }
         ],
     }

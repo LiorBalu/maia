@@ -16,18 +16,28 @@ import jwt
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
-from maia.api.sse_manager import redis_sse_manager
-from maia.config import ALGORITHM, JWT_SECRET
+from maia.api.sse_manager import sse_broadcast_manager
+from maia.config import JWT_SIGNING_ALGORITHM, JWT_SIGNING_SECRET
 
 logger = logging.getLogger(__name__)
 
 sse_router = APIRouter(prefix="/sse", tags=["Server-Sent Events"])
 
-HEARTBEAT_SECONDS = 25  # reverse proxies drop idle streams (typically after ~100 s)
+HEARTBEAT_INTERVAL_SECONDS = 25  # reverse proxies drop idle streams (typically after ~100 s)
+
+
+def _build_heartbeat_payload() -> dict:
+    """The event sent when the queue stays silent for HEARTBEAT_INTERVAL_SECONDS."""
+    return {"type": "heartbeat", "timestamp": datetime.now().isoformat()}
+
+
+def _format_event_frame(event_payload: dict) -> str:
+    """One event in the SSE wire format: a `data:` line with the JSON payload, then a blank line."""
+    return f"data: {json.dumps(event_payload, default=str, ensure_ascii=False)}\n\n"
 
 
 class SSEConnection:
-    """One browser subscription: a queue that the stream generator drains."""
+    """One browser subscription: a queue that `stream_events` drains."""
 
     def __init__(self, tenant_name: str, user_id: str):
         """Create the queue and a unique connection id (tenant:user:milliseconds)."""
@@ -38,74 +48,88 @@ class SSEConnection:
         self.watcher: asyncio.Task | None = None
         self.connection_id = f"{tenant_name}:{user_id}:{int(time.time() * 1000)}"
 
-    async def send_data(self, data: dict):
+    async def enqueue_payload(self, sse_event: dict):
         """Queue a payload for the browser."""
         if self.active:
-            await self.queue.put(data)
+            await self.queue.put(sse_event)
 
-    def close(self):
+    def tear_down(self):
         """Deactivate the connection and forget it."""
         self.active = False
-        redis_sse_manager.local_connections.pop(self.connection_id, None)
+        sse_broadcast_manager.local_connections.pop(self.connection_id, None)
 
-    async def generator(self):
-        """Yield the queued payloads as `data:` lines, and a heartbeat after HEARTBEAT_SECONDS of silence."""
+    async def stream_events(self):
+        """Yield the queued payloads as `data:` lines, and a heartbeat after HEARTBEAT_INTERVAL_SECONDS of silence."""
         try:
             while self.active:
                 try:
-                    data = await asyncio.wait_for(self.queue.get(), timeout=HEARTBEAT_SECONDS)
+                    event_payload = await asyncio.wait_for(self.queue.get(), timeout=HEARTBEAT_INTERVAL_SECONDS)
                 except asyncio.TimeoutError:
-                    data = {"type": "heartbeat", "timestamp": datetime.now().isoformat()}
+                    event_payload = _build_heartbeat_payload()
                 if not self.active:
                     break
-                yield f"data: {json.dumps(data, default=str, ensure_ascii=False)}\n\n"
+                yield _format_event_frame(event_payload)
         except asyncio.CancelledError:
             pass
         finally:
-            self.close()
+            self.tear_down()
+
+
+def _authenticate_stream_token(token: str) -> str:
+    """The dashboard user id of the stream's JWT (its `sub` claim as a string); 401 when the token does not decode."""
+    try:
+        token_claims = jwt.decode(token, JWT_SIGNING_SECRET, algorithms=[JWT_SIGNING_ALGORITHM])
+        dashboard_user_id = str(token_claims.get("sub"))
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return dashboard_user_id
+
+
+def _register_browser_connection(tenant_name: str, dashboard_user_id: str) -> SSEConnection:
+    """Create the browser's connection, add it to the open connections of this process and log the new count."""
+    browser_connection = SSEConnection(tenant_name, dashboard_user_id)
+    sse_broadcast_manager.local_connections[browser_connection.connection_id] = browser_connection
+    logger.info(
+        f"SSE connected: {browser_connection.connection_id} ({len(sse_broadcast_manager.local_connections)} open)"
+    )
+    return browser_connection
+
+
+async def _watch_browser_disconnect(browser_connection: SSEConnection, http_request: Request):
+    """Tear down the connection once the browser is gone (polled every 5 s)."""
+    try:
+        while browser_connection.active:
+            if await http_request.is_disconnected():
+                break
+            await asyncio.sleep(5)
+    finally:
+        browser_connection.tear_down()
+        logger.info(f"SSE closed: {browser_connection.connection_id}")
 
 
 @sse_router.get("/{tenant_name}/conversations")
-async def conversations_sse(
+async def stream_conversation_updates(
     tenant_name: str,
-    request: Request,
+    http_request: Request,
     token: str = Query(..., description="JWT of the dashboard user (EventSource cannot send headers)"),
 ):
     """Open the event stream of a tenant's inbox. Each event is `{"type": "message_update", "conversation": {...}}`."""
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
-        user_id = str(payload.get("sub"))
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    dashboard_user_id = _authenticate_stream_token(token)
 
-    connection = SSEConnection(tenant_name, user_id)
-    redis_sse_manager.local_connections[connection.connection_id] = connection
-    logger.info(f"SSE connected: {connection.connection_id} ({len(redis_sse_manager.local_connections)} open)")
-
-    async def watch_disconnect():
-        """Close the connection once the browser is gone (polled every 5 s)."""
-        try:
-            while connection.active:
-                if await request.is_disconnected():
-                    break
-                await asyncio.sleep(5)
-        finally:
-            connection.close()
-            logger.info(f"SSE closed: {connection.connection_id}")
-
-    connection.watcher = asyncio.create_task(watch_disconnect())
+    browser_connection = _register_browser_connection(tenant_name, dashboard_user_id)
+    browser_connection.watcher = asyncio.create_task(_watch_browser_disconnect(browser_connection, http_request))
     return StreamingResponse(
-        connection.generator(),
+        browser_connection.stream_events(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
 
 
-async def start_sse_manager():
+async def start_sse_broadcast_listener():
     """FastAPI startup: subscribe to the Redis broadcast channel."""
-    await redis_sse_manager.initialize()
+    await sse_broadcast_manager.start_broadcast_listener()
 
 
-async def stop_sse_manager():
+async def stop_sse_broadcast_listener():
     """FastAPI shutdown: stop the listener and close the connections."""
-    await redis_sse_manager.shutdown()
+    await sse_broadcast_manager.stop_broadcast_listener()

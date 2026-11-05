@@ -1,29 +1,40 @@
-"""Mongo connections: mongoengine, raw pymongo `db` and the odmantic engine."""
+"""Mongo connections: mongoengine, raw pymongo `pymongo_database` and the odmantic engine."""
 
 import logging
 from os import getenv
 from typing import Optional
 from pymongo import MongoClient
-from maia.config import MONGO_URI
+from maia.config import MONGO_CONNECTION_STRING
 from odmantic import AIOEngine
 from motor.motor_asyncio import AsyncIOMotorClient
 from mongoengine import connect
 
 logger = logging.getLogger(__name__)
 
-DB_NAME = getenv("MAIA_DB_NAME", "maia")
-client_mongo: AsyncIOMotorClient = AsyncIOMotorClient(
+MONGO_DATABASE_NAME = getenv("MAIA_DB_NAME", "maia")
+motor_client: AsyncIOMotorClient = AsyncIOMotorClient(
     getenv("MONGO_URI", "mongodb://localhost:27017")
 )
-connect(DB_NAME, host=getenv("MONGO_URI", "mongodb://localhost:27017"))
+connect(MONGO_DATABASE_NAME, host=getenv("MONGO_URI", "mongodb://localhost:27017"))
 
-manager_engine: AIOEngine = AIOEngine(
-    client=client_mongo, database=DB_NAME
+odmantic_engine: AIOEngine = AIOEngine(
+    client=motor_client, database=MONGO_DATABASE_NAME
 )
-mongo_client: MongoClient = MongoClient(
+pymongo_client: MongoClient = MongoClient(
     getenv("MONGO_URI", "mongodb://localhost:27017")
 )
-db = mongo_client[DB_NAME]
+pymongo_database = pymongo_client[MONGO_DATABASE_NAME]
+
+
+def _resolve_mongo_uri() -> str:
+    """The connection string MongoService opens: MONGO_CONNECTION_STRING from maia.config, else the local default
+    (with a warning). The module-level clients above read MONGO_URI themselves, with their own default.
+    """
+    connection_uri = MONGO_CONNECTION_STRING
+    if not connection_uri:
+        connection_uri = "mongodb://localhost:27017/"
+        logger.warning("MONGO_URI environment variable not found. Using default value.")
+    return connection_uri
 
 
 class MongoService:
@@ -49,18 +60,15 @@ class MongoService:
     """
 
     def __init__(self, db_name, client: Optional[MongoClient] = None):
-        """Open a MongoClient on MONGO_URI (or use the given client) and select the database."""
-        mongo_str = MONGO_URI
-        if not mongo_str:
-            mongo_str = "mongodb://localhost:27017/"
-            logger.warning("MONGO_URI environment variable not found. Using default value.")
+        """Open a MongoClient on MONGO_CONNECTION_STRING (or use the given client) and select the database."""
+        connection_uri = _resolve_mongo_uri()
         try:
             self.client: MongoClient = client or MongoClient(
-                mongo_str, serverSelectionTimeoutMS=5000
+                connection_uri, serverSelectionTimeoutMS=5000
             )
             self.db = self.client[db_name]
             logger.info(f"Connected to MongoDB database: {db_name}")
 
-        except Exception as e:
-            logger.error(f"An error occurred while connecting to MongoDB: {e}")
+        except Exception as error:
+            logger.error(f"An error occurred while connecting to MongoDB: {error}")
             raise

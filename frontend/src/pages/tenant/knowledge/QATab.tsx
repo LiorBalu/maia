@@ -9,7 +9,6 @@ import {
   createQA,
   createQABulk,
   deleteQA,
-  getQACategories,
   getQACount,
   listQA,
   updateQA,
@@ -22,26 +21,22 @@ import { errorDetail } from '@/lib/errors'
 export function QATab({ tenant }: { tenant: string }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const [category, setCategory] = useState<string | undefined>()
   const [adding, setAdding] = useState(false)
   const [bulkOpen, setBulkOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const count = useQuery({ queryKey: ['qa-count', tenant], queryFn: () => getQACount(tenant) })
-  const categories = useQuery({ queryKey: ['qa-categories', tenant], queryFn: () => getQACategories(tenant) })
   const list = useInfiniteQuery({
-    queryKey: ['qa', tenant, category] as const,
-    queryFn: ({ pageParam }) => listQA(tenant, pageParam, category),
+    queryKey: ['qa', tenant] as const,
+    queryFn: ({ pageParam }) => listQA(tenant, pageParam),
     initialPageParam: 1,
     getNextPageParam: (last, pages) => (last.length === QA_PAGE_SIZE ? pages.length + 1 : undefined),
   })
   const items = useMemo(() => list.data?.pages.flat() ?? [], [list.data])
-  const categoryNames = (categories.data ?? []).map((c) => c.category).filter((c) => c && c !== 'general')
 
   const invalidateAll = () => {
     void queryClient.invalidateQueries({ queryKey: ['qa', tenant] })
     void queryClient.invalidateQueries({ queryKey: ['qa-count', tenant] })
-    void queryClient.invalidateQueries({ queryKey: ['qa-categories', tenant] })
   }
 
   const create = useMutation({
@@ -107,7 +102,6 @@ export function QATab({ tenant }: { tenant: string }) {
 
       {adding && (
         <QAForm
-          categories={categoryNames}
           saving={create.isPending}
           onCancel={() => setAdding(false)}
           onSubmit={(input) => create.mutate(input)}
@@ -115,29 +109,15 @@ export function QATab({ tenant }: { tenant: string }) {
       )}
       {bulkOpen && <BulkForm saving={bulk.isPending} onCancel={() => setBulkOpen(false)} onSubmit={(inputs) => bulk.mutate(inputs)} />}
 
-      {categoryNames.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          <Chip active={!category} onClick={() => setCategory(undefined)}>
-            {t('knowledge.qa.allCategories')}
-          </Chip>
-          {categoryNames.map((name) => (
-            <Chip key={name} active={category === name} onClick={() => setCategory(name)}>
-              {name}
-            </Chip>
-          ))}
-        </div>
-      )}
-
       {list.isLoading && <div className="card p-6 text-sm text-ink-muted">{t('common.loading')}</div>}
       {list.isError && <ErrorState onRetry={() => void list.refetch()} />}
-      {list.data && items.length === 0 && <EmptyState text={category ? t('knowledge.qa.emptyFiltered') : t('knowledge.qa.empty')} />}
+      {list.data && items.length === 0 && <EmptyState text={t('knowledge.qa.empty')} />}
       {items.length > 0 && (
         <ul className="card divide-y divide-brand-50">
           {items.map((item) => (
             <QARow
               key={item.id}
               item={item}
-              categories={categoryNames}
               saving={update.isPending && update.variables?.id === item.id}
               onSave={(patch) => update.mutate({ id: item.id, patch })}
               onDelete={() => {
@@ -158,30 +138,13 @@ export function QATab({ tenant }: { tenant: string }) {
   )
 }
 
-function Chip({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={clsx(
-        'rounded-full px-2.5 py-1 text-xs font-medium transition-colors',
-        active ? 'bg-brand-600 text-white' : 'bg-white text-ink-soft ring-1 ring-brand-100 hover:bg-brand-50 hover:text-brand-800',
-      )}
-    >
-      {children}
-    </button>
-  )
-}
-
 function QAForm({
   initial,
-  categories,
   saving,
   onCancel,
   onSubmit,
 }: {
   initial?: QAItem
-  categories: string[]
   saving: boolean
   onCancel: () => void
   onSubmit: (input: QAInput) => void
@@ -189,12 +152,11 @@ function QAForm({
   const { t } = useTranslation()
   const [question, setQuestion] = useState(initial?.question ?? '')
   const [answer, setAnswer] = useState(initial?.answer ?? '')
-  const [category, setCategory] = useState(initial?.category && initial.category !== 'general' ? initial.category : '')
 
   function submit(event: FormEvent) {
     event.preventDefault()
     if (!question.trim() || !answer.trim()) return
-    onSubmit({ question: question.trim(), answer: answer.trim(), category: category.trim() || undefined })
+    onSubmit({ question: question.trim(), answer: answer.trim() })
   }
 
   return (
@@ -213,15 +175,6 @@ function QAForm({
         <label className="label">{t('knowledge.qa.answer')}</label>
         <textarea className="input min-h-[6rem]" value={answer} onChange={(e) => setAnswer(e.target.value)} dir="auto" required />
       </div>
-      <div className="max-w-xs">
-        <label className="label">{t('knowledge.qa.category')}</label>
-        <input className="input" list="qa-categories" value={category} onChange={(e) => setCategory(e.target.value)} dir="auto" placeholder={t('knowledge.qa.categoryPlaceholder')} />
-        <datalist id="qa-categories">
-          {categories.map((c) => (
-            <option key={c} value={c} />
-          ))}
-        </datalist>
-      </div>
       <div className="flex gap-2">
         <button type="submit" className="btn-primary" disabled={saving || !question.trim() || !answer.trim()}>
           {saving ? t('knowledge.qa.saving') : t('knowledge.qa.save')}
@@ -234,7 +187,7 @@ function QAForm({
   )
 }
 
-/** Paste many pairs at once: one per line, "question | answer | category" (category optional). */
+/** Paste many pairs at once: one per line, "question | answer". */
 function BulkForm({ saving, onCancel, onSubmit }: { saving: boolean; onCancel: () => void; onSubmit: (inputs: QAInput[]) => void }) {
   const { t } = useTranslation()
   const [text, setText] = useState('')
@@ -244,7 +197,7 @@ function BulkForm({ saving, onCancel, onSubmit }: { saving: boolean; onCancel: (
         .split('\n')
         .map((line) => line.split('|').map((s) => s.trim()))
         .filter((cols) => cols.length >= 2 && cols[0] && cols[1])
-        .map((cols) => ({ question: cols[0], answer: cols[1], category: cols[2] || undefined })),
+        .map((cols) => ({ question: cols[0], answer: cols[1] })),
     [text],
   )
   return (
@@ -277,13 +230,11 @@ function BulkForm({ saving, onCancel, onSubmit }: { saving: boolean; onCancel: (
 
 function QARow({
   item,
-  categories,
   saving,
   onSave,
   onDelete,
 }: {
   item: QAItem
-  categories: string[]
   saving: boolean
   onSave: (patch: Partial<QAInput>) => void
   onDelete: () => void
@@ -297,7 +248,6 @@ function QARow({
       <li className="p-3">
         <QAForm
           initial={item}
-          categories={categories}
           saving={saving}
           onCancel={() => setEditing(false)}
           onSubmit={(input) => {
@@ -325,7 +275,6 @@ function QARow({
               {expanded ? t('knowledge.qa.less') : t('knowledge.qa.more')}
             </button>
           )}
-          {item.category && item.category !== 'general' && <span className="badge bg-brand-50 text-brand-800 ring-1 ring-brand-100">{item.category}</span>}
           {!item.is_indexed && <span className="badge bg-amber-50 text-amber-700">{t('knowledge.qa.notIndexed')}</span>}
         </div>
       </div>

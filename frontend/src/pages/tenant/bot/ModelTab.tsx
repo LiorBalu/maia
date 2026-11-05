@@ -48,7 +48,6 @@ export function ModelTab({ tenant }: { tenant: string }) {
         name: agent?.name ?? 'Default Agent',
         description: agent?.description ?? t('bot.model.defaultDescription'),
         is_active: true,
-        direct_answer_threshold: agent?.direct_answer_threshold ?? 0,
         ...form,
         model: form.model.trim(),
       }

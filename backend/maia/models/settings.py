@@ -56,6 +56,43 @@ class FeatureSettings(EmbeddedDocument):
     meta_help = DictField(default=dict)
 
 
+def _build_feature_flag_from_defaults(feature_flag_name: str, feature_defaults: dict) -> FeatureSettings:
+    """A new FeatureSettings built from the feature's default definition (not appended, not saved)."""
+    return FeatureSettings(
+        name=feature_flag_name,
+        enabled=feature_defaults["enabled"],
+        meta_data=feature_defaults["meta_data"],
+        options=feature_defaults["options"],
+        description=feature_defaults["description"],
+        he_description=feature_defaults["he_description"],
+        meta_help=feature_defaults.get("meta_help", {}),
+    )
+
+
+def _align_feature_flag_with_defaults(stored_flag: FeatureSettings, feature_defaults: dict) -> bool:
+    """Sync a stored feature flag with its defaults (options, empty descriptions); returns True when it changed."""
+    is_flag_changed = False
+    if not hasattr(stored_flag, "options") or stored_flag.options is None:
+        stored_flag.options = {}
+        is_flag_changed = True
+
+    # Update options: always sync with defaults (override if different)
+    for option_name, default_value in feature_defaults["options"].items():
+        if option_name not in stored_flag.options or stored_flag.options[option_name] != default_value:
+            stored_flag.options[option_name] = default_value
+            is_flag_changed = True
+
+    if not hasattr(stored_flag, "description") or not stored_flag.description:
+        stored_flag.description = feature_defaults["description"]
+        is_flag_changed = True
+
+    if not hasattr(stored_flag, "he_description") or not stored_flag.he_description:
+        stored_flag.he_description = feature_defaults["he_description"]
+        is_flag_changed = True
+
+    return is_flag_changed
+
+
 class ChatSettingsDocument(Document):
     """Chat settings of a tenant: the human-like delay and the feature flags (image_to_text)."""
     tenant_name = StringField(required=True)
@@ -64,29 +101,22 @@ class ChatSettingsDocument(Document):
     features = ListField(EmbeddedDocumentField(FeatureSettings))
     meta = {"collection": "chat_settings"}
 
-    def get_feature(self, feature_name: str) -> FeatureSettings:
+    def ensure_feature(self, feature_name: str) -> FeatureSettings:
         """The feature by name; a missing one is created from its default config and saved."""
-        feature = next((feature for feature in self.features if feature.name == feature_name), None)
+        feature = next((candidate for candidate in self.features if candidate.name == feature_name), None)
         if not feature:
-            default_config = self.get_default_feature_config(feature_name)
+            feature_defaults = self.resolve_feature_defaults(feature_name)
 
-            feature = FeatureSettings(
-                name=feature_name,
-                enabled=default_config["enabled"],
-                meta_data=default_config["meta_data"],
-                options=default_config["options"],
-                description=default_config["description"],
-                he_description=default_config["he_description"],
-            )
+            feature = _build_feature_flag_from_defaults(feature_name, feature_defaults)
 
             self.features.append(feature)
             self.save()
         return feature
 
     @classmethod
-    def get_default_feature_config(cls, feature_name: str) -> dict:
+    def resolve_feature_defaults(cls, feature_name: str) -> dict:
         """Default definition of a chat feature (image_to_text); unknown names get a disabled stub."""
-        default_configs = {
+        known_feature_defaults = {
             "image_to_text": {
                 "enabled": False,
                 "meta_data": {},
@@ -96,7 +126,7 @@ class ChatSettingsDocument(Document):
             },
         }
 
-        return default_configs.get(
+        return known_feature_defaults.get(
             feature_name,
             {
                 "enabled": False,
@@ -107,60 +137,33 @@ class ChatSettingsDocument(Document):
             },
         )
 
-    def update_all_features(self):
+    def backfill_feature_defaults(self):
         """Backfill the known chat features and their options / descriptions; returns True when something was saved.
         """
-        updated = False
-        all_default_features = ["image_to_text"]
+        has_changes = False
+        known_feature_names = ["image_to_text"]
 
-        existing_features = {feature.name: feature for feature in self.features}
+        stored_flags_by_name = {feature.name: feature for feature in self.features}
 
-        for feature_name in all_default_features:
-            default_config = self.get_default_feature_config(feature_name)
+        for feature_name in known_feature_names:
+            feature_defaults = self.resolve_feature_defaults(feature_name)
 
-            if feature_name in existing_features:
-                existing_feature = existing_features[feature_name]
-                feature_updated = False
-                if not hasattr(existing_feature, "options") or existing_feature.options is None:
-                    existing_feature.options = {}
-                    feature_updated = True
-
-                # Update options: always sync with defaults (override if different)
-                for key, value in default_config["options"].items():
-                    if key not in existing_feature.options or existing_feature.options[key] != value:
-                        existing_feature.options[key] = value
-                        feature_updated = True
-
-                if not hasattr(existing_feature, "description") or not existing_feature.description:
-                    existing_feature.description = default_config["description"]
-                    feature_updated = True
-
-                if not hasattr(existing_feature, "he_description") or not existing_feature.he_description:
-                    existing_feature.he_description = default_config["he_description"]
-                    feature_updated = True
-
-                if feature_updated:
-                    updated = True
+            if feature_name in stored_flags_by_name:
+                stored_flag = stored_flags_by_name[feature_name]
+                if _align_feature_flag_with_defaults(stored_flag, feature_defaults):
+                    has_changes = True
 
             else:
-                new_feature = FeatureSettings(
-                    name=feature_name,
-                    enabled=default_config["enabled"],
-                    meta_data=default_config["meta_data"],
-                    options=default_config["options"],
-                    description=default_config["description"],
-                    he_description=default_config["he_description"],
-                    meta_help=default_config.get("meta_help", {}),
-                )
-                self.features.append(new_feature)
-                updated = True
+                added_flag = _build_feature_flag_from_defaults(feature_name, feature_defaults)
+                self.features.append(added_flag)
+                has_changes = True
 
-        if updated:
+        if has_changes:
             try:
                 self.save()
                 return True
-            except Exception as e:
-                logger.error(f"Error saving {self.tenant_name}: {str(e)}")
+            except Exception as error:
+                logger.error(f"Error saving {self.tenant_name}: {str(error)}")
                 return False
         else:
             return False

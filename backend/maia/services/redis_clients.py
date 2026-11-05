@@ -6,42 +6,48 @@ from typing import Optional
 from urllib.parse import urlparse
 
 
-def _redis_url() -> str:
+def _resolve_redis_url() -> str:
     """REDIS_URL from the environment, with the local default."""
     return getenv("REDIS_URL", "redis://localhost:6379/0")
 
 
-def get_sync_redis(*, decode_responses: bool = True, **extra):
+def build_sync_redis_client(*, should_decode_responses: bool = True, **client_options):
     """Build a sync `redis.Redis` client."""
     import redis
 
-    return redis.from_url(_redis_url(), decode_responses=decode_responses, **extra)
+    return redis.from_url(_resolve_redis_url(), decode_responses=should_decode_responses, **client_options)
 
 
-def get_async_redis(*, decode_responses: bool = True, **extra):
+def build_async_redis_client(*, should_decode_responses: bool = True, **client_options):
     """Build an asyncio `redis.asyncio.Redis` client (the SSE listener)."""
     import redis.asyncio as aioredis
 
-    return aioredis.from_url(_redis_url(), decode_responses=decode_responses, **extra)
+    return aioredis.from_url(_resolve_redis_url(), decode_responses=should_decode_responses, **client_options)
 
 
-def get_arq_redis_settings(**overrides):
+def _parse_database_index(url_path: str) -> int:
+    """Redis database index from the path of REDIS_URL ("/3" -> 3); 0 when the path is empty or just "/"."""
+    index_text = url_path.strip("/") if url_path else ""
+    return int(index_text) if index_text else 0
+
+
+def build_arq_redis_settings(**settings_overrides):
     """arq RedisSettings built from REDIS_URL."""
     from arq.connections import RedisSettings
 
-    parsed = urlparse(_redis_url())
-    kwargs = dict(
-        host=parsed.hostname or "redis-stack",
-        port=parsed.port or 6379,
-        database=int(parsed.path.strip("/")) if parsed.path and parsed.path.strip("/") else 0,
-        password=parsed.password,
+    parsed_url = urlparse(_resolve_redis_url())
+    settings_fields = dict(
+        host=parsed_url.hostname or "redis-stack",
+        port=parsed_url.port or 6379,
+        database=_parse_database_index(parsed_url.path),
+        password=parsed_url.password,
     )
-    kwargs.update(overrides)
-    return RedisSettings(**kwargs)
+    settings_fields.update(settings_overrides)
+    return RedisSettings(**settings_fields)
 
 
-def make_redis_chat_history(session_id: str, key_prefix: str, ttl: Optional[int] = None):
+def build_redis_chat_history_store(history_session_id: str, history_key_prefix: str, expiry_seconds: Optional[int] = None):
     """Build a LangChain `RedisChatMessageHistory` on REDIS_URL."""
     from langchain_community.chat_message_histories import RedisChatMessageHistory
 
-    return RedisChatMessageHistory(session_id=session_id, url=_redis_url(), key_prefix=key_prefix, ttl=ttl)
+    return RedisChatMessageHistory(session_id=history_session_id, url=_resolve_redis_url(), key_prefix=history_key_prefix, ttl=expiry_seconds)

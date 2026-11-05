@@ -2,11 +2,27 @@
 
 from typing import Optional
 
-from maia.models.conversations import Conversation, online_conversation_filter
+from maia.models.conversations import Conversation, build_online_conversation_filter
 
 
-def get_or_create_online_conversation(
-    tenant_name: str, customer_id: str, platform: str = "unknown", profile_name: Optional[str] = None
+def _replace_placeholder_profile_name(
+    online_conversation: Conversation, sender_id: str, customer_profile_name: Optional[str]
+) -> None:
+    """Give the conversation the customer's profile name when its own is empty or still the raw sender id;
+    saves only when it changes the name."""
+    if (
+        customer_profile_name
+        and customer_profile_name != online_conversation.profile_name
+        and (not online_conversation.profile_name or online_conversation.profile_name == sender_id)
+    ):
+        # Only overwrite when currently unset or still the raw id (e.g. phone number) —
+        # never clobber a real name (from the WhatsApp push name) that's already there.
+        online_conversation.profile_name = customer_profile_name
+        online_conversation.save()
+
+
+def ensure_online_conversation(
+    tenant_name: str, sender_id: str, platform: str = "unknown", customer_profile_name: Optional[str] = None
 ) -> Conversation:
     """
     Get or create a conversation for the given tenant and customer.
@@ -15,26 +31,21 @@ def get_or_create_online_conversation(
     each platform (WhatsApp, telephone, ...) keeps its own online conversation for a number.
 
     :param tenant_name: The name of the tenant.
-    :param customer_id: The ID of the customer.
+    :param sender_id: The ID of the customer.
     :param platform: The platform of the conversation.
-    :param profile_name: The profile name of the customer.
+    :param customer_profile_name: The profile name of the customer.
     :return: The conversation document.
     """
-    conversation = Conversation.objects(**online_conversation_filter(tenant_name, customer_id, platform)).first()
+    online_conversation = Conversation.objects(
+        **build_online_conversation_filter(tenant_name, sender_id, platform)
+    ).first()
 
-    if not conversation:
-        conversation = Conversation(
-            tenant_name=tenant_name, phone_number=customer_id, platform=platform, profile_name=profile_name
+    if not online_conversation:
+        online_conversation = Conversation(
+            tenant_name=tenant_name, phone_number=sender_id, platform=platform, profile_name=customer_profile_name
         )
-        conversation.save()
-    elif (
-        profile_name
-        and profile_name != conversation.profile_name
-        and (not conversation.profile_name or conversation.profile_name == customer_id)
-    ):
-        # Only overwrite when currently unset or still the raw id (e.g. phone number) —
-        # never clobber a real name (from the WhatsApp push name) that's already there.
-        conversation.profile_name = profile_name
-        conversation.save()
+        online_conversation.save()
+    else:
+        _replace_placeholder_profile_name(online_conversation, sender_id, customer_profile_name)
 
-    return conversation
+    return online_conversation

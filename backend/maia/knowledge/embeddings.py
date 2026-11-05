@@ -21,8 +21,17 @@ from langchain_core.embeddings import Embeddings
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from dotenv import load_dotenv
 from requests.exceptions import HTTPError
-COHERE_BATCH_SIZE = 96  # Max texts per API call to avoid rate limits
+COHERE_MAX_TEXTS_PER_REQUEST = 96  # Max texts per API call to avoid rate limits
 load_dotenv()
+
+
+def _require_cohere_api_key() -> str:
+    """The COHERE_API_KEY environment variable; raises ValueError when it is not set."""
+    cohere_api_key = os.getenv("COHERE_API_KEY")
+    if not cohere_api_key:
+        raise ValueError("COHERE_API_KEY is not set")
+    return cohere_api_key
+
 
 class CohereEmbeddingsV4(Embeddings):
     """
@@ -43,8 +52,8 @@ class CohereEmbeddingsV4(Embeddings):
         vector = embeddings.embed_query("search query")
     """
     
-    model: str = "embed-v4.0"
-    dimensions: int = 1024
+    embedding_model_name: str = "embed-v4.0"
+    embedding_dimensions: int = 1024
     
     def __init__(self, input_type: str = "search_document"):
         """
@@ -53,10 +62,8 @@ class CohereEmbeddingsV4(Embeddings):
         Args:
             input_type: "search_document" for indexing, "search_query" for retrieval
         """
-        COHERE_API_KEY = os.getenv("COHERE_API_KEY")
-        if not COHERE_API_KEY:
-            raise ValueError("COHERE_API_KEY is not set")
-        self.client = cohere.ClientV2(api_key=os.getenv("COHERE_API_KEY"))
+        cohere_api_key = _require_cohere_api_key()
+        self.client = cohere.ClientV2(api_key=cohere_api_key)
         self.input_type = input_type
     
     @retry(
@@ -65,25 +72,25 @@ class CohereEmbeddingsV4(Embeddings):
         retry=retry_if_exception_type((HTTPError, TimeoutError)),
         reraise=True
     )
-    def _embed_batch(self, texts: List[str], input_type: str) -> List[List[float]]:
+    def _embed_text_batch(self, batch_texts: List[str], input_type: str) -> List[List[float]]:
         """
         Embed a single batch with retry logic.
         
         Args:
-            texts: List of texts to embed (max 96)
+            batch_texts: List of texts to embed (max 96)
             input_type: "search_document" or "search_query"
             
         Returns:
             List of embedding vectors
         """
-        response = self.client.embed(
-            texts=texts,
-            model=self.model,
+        embed_response = self.client.embed(
+            texts=batch_texts,
+            model=self.embedding_model_name,
             input_type=input_type,
             embedding_types=["float"],
             output_dimension=1024
         )
-        return response.embeddings.float
+        return embed_response.embeddings.float
     
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """
@@ -96,14 +103,14 @@ class CohereEmbeddingsV4(Embeddings):
         Returns:
             List of embedding vectors (1024 dimensions each)
         """
-        all_embeddings = []
+        document_embeddings = []
         
-        for i in range(0, len(texts), COHERE_BATCH_SIZE):
-            batch = texts[i:i + COHERE_BATCH_SIZE]
-            batch_embeddings = self._embed_batch(batch, input_type="search_document")
-            all_embeddings.extend(batch_embeddings)
+        for batch_start in range(0, len(texts), COHERE_MAX_TEXTS_PER_REQUEST):
+            batch_texts = texts[batch_start:batch_start + COHERE_MAX_TEXTS_PER_REQUEST]
+            batch_embeddings = self._embed_text_batch(batch_texts, input_type="search_document")
+            document_embeddings.extend(batch_embeddings)
         
-        return all_embeddings
+        return document_embeddings
     
     def embed_query(self, text: str) -> List[float]:
         """
@@ -115,8 +122,8 @@ class CohereEmbeddingsV4(Embeddings):
         Returns:
             Embedding vector (1024 dimensions)
         """
-        embeddings = self._embed_batch([text], input_type="search_query")
-        return embeddings[0]
+        query_batch_embeddings = self._embed_text_batch([text], input_type="search_query")
+        return query_batch_embeddings[0]
 
     @retry(
         stop=stop_after_attempt(3),
@@ -124,7 +131,7 @@ class CohereEmbeddingsV4(Embeddings):
         retry=retry_if_exception_type((HTTPError, TimeoutError)),
         reraise=True
     )
-    def embed_image(self, image_data_uri: str) -> List[float]:
+    def embed_image_from_data_url(self, image_data_uri: str) -> List[float]:
         """
         Embed a single image using Cohere embed-v4.0 multimodal support.
         
@@ -134,11 +141,11 @@ class CohereEmbeddingsV4(Embeddings):
         Returns:
             Embedding vector (1024 dimensions)
         """
-        response = self.client.embed(
+        image_embed_response = self.client.embed(
             images=[image_data_uri],
-            model=self.model,
+            model=self.embedding_model_name,
             input_type="image",
             embedding_types=["float"],
             output_dimension=1024
         )
-        return response.embeddings.float[0]
+        return image_embed_response.embeddings.float[0]

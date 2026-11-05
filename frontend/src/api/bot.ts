@@ -56,7 +56,6 @@ export interface Agent {
   score_threshold: number
   top_k_general: number
   top_k_qa: number
-  direct_answer_threshold: number
   created_at?: number
   updated_at?: number
 }

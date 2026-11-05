@@ -53,7 +53,7 @@ class PromptDocument(Document):
     meta = {"collection": "prompts"}
 
     @property
-    def prompt(self):
+    def prompt_text(self):
         """The prompt text (`content`, or "" when empty)."""
         return self.content or ""
 
@@ -62,7 +62,7 @@ class PromptDocument(Document):
         self.modified_at = datetime.now(timezone.utc)
         return super(PromptDocument, self).save(*args, **kwargs)
 
-    def to_dict(self):
+    def serialize_for_api(self):
         """Prompt as a dict for the API."""
         return {
             "id": str(self.id),
@@ -72,5 +72,5 @@ class PromptDocument(Document):
             "modified_at": self.modified_at,
             "modified_by": self.modified_by,
             "label": self.label or self.name,
-            "prompt": self.prompt,
+            "prompt": self.prompt_text,
         }

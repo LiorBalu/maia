@@ -2,14 +2,14 @@
 
 import requests
 
-def read_txt(filename: str) -> str:
+def extract_text_from_txt(file_path_or_url: str) -> str:
     """Text of a UTF-8 file (URL or path)."""
-    if filename.startswith("http://") or filename.startswith("https://"):
-        response = requests.get(filename)
-        response.raise_for_status()
+    if file_path_or_url.startswith("http://") or file_path_or_url.startswith("https://"):
+        http_response = requests.get(file_path_or_url)
+        http_response.raise_for_status()
         # Assume UTF-8 encoding here
-        file_text = response.content.decode("utf-8")
+        attachment_text = http_response.content.decode("utf-8")
     else:
-        with open(filename, "r", encoding="utf-8") as f:
-            file_text = f.read()
-    return file_text
+        with open(file_path_or_url, "r", encoding="utf-8") as text_file:
+            attachment_text = text_file.read()
+    return attachment_text

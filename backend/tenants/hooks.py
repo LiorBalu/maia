@@ -4,15 +4,16 @@ Tenant hooks: give each inbound message the tools of its tenant, then run the te
 Two layers, both optional:
 
 1. ``TenantDocument.tools`` - the tool names chosen on the dashboard (Bot > Tools). Applied to
-   every tenant by ``apply_tenant_tools``; this is how a business opened from the dashboard
+   every tenant by ``add_tenant_selected_tools``; this is how a business opened from the dashboard
    gets the calendar and sheet tools without any code.
-2. ``tenants/<name with '-' → '_'>/handling.py`` exposing ``async def handle_<folder>(request)``:
+2. ``tenants/<name with '-' → '_'>/handling.py`` exposing ``async def prepare_context_for_<folder>(message_context)``:
    custom code for one business (its own ``function_tools.py`` tools, per-customer logic). The
    folder name is the only registration.
 """
 
 import logging
 import importlib
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from maia.pipeline.context import ReplyReady, MessageContext
@@ -21,67 +22,91 @@ from maia.pipeline.tools.function_decorator import FunctionTool
 logger = logging.getLogger(__name__)
 
 
-def apply_tenant_tools(request: MessageContext) -> list:
-    """Append the tools stored on the tenant document to ``request["tool_names"]``.
+def add_tenant_selected_tools(message_context: MessageContext) -> list:
+    """Append the tools stored on the tenant document to ``message_context["tool_names"]``.
 
     Only names registered at startup are bound; a stale name (a tool that was removed from the
     code) is logged and skipped. Returns the names that were added.
     """
-    tenant = request.get("tenant")
-    configured = list(getattr(tenant, "tools", None) or [])
-    added = []
-    for name in configured:
-        if not FunctionTool.get_function(name):
-            logger.warning("Tool '%s' configured for tenant '%s' is not registered; skipped", name, request.get("tenant_name"))
+    tenant_doc = message_context.get("tenant")
+    configured_tool_names = list(getattr(tenant_doc, "tools", None) or [])
+    bound_tool_names = []
+    for tool_name in configured_tool_names:
+        if not FunctionTool.find_tool(tool_name):
+            logger.warning("Tool '%s' configured for tenant '%s' is not registered; skipped", tool_name, message_context.get("tenant_name"))
             continue
-        if name not in request["tool_names"]:
-            request["tool_names"].append(name)
-            added.append(name)
-    if added:
-        logger.info("Tools from the tenant settings: %s", ", ".join(added))
-    return added
+        if tool_name not in message_context["tool_names"]:
+            message_context["tool_names"].append(tool_name)
+            bound_tool_names.append(tool_name)
+    if bound_tool_names:
+        logger.info("Tools from the tenant settings: %s", ", ".join(bound_tool_names))
+    return bound_tool_names
 
 
-async def run_tenant_hooks(request: MessageContext, tenant_name: str) -> None:
+def _find_tenant_handler(tenant_name: str) -> Callable[[MessageContext], Awaitable[None]] | None:
+    """Import ``tenants/<folder>/handling.py`` and return its ``prepare_context_for_<folder>`` function.
+
+    ``<folder>`` is ``tenant_name`` with ``-`` replaced by ``_``. Returns None when the folder, its
+    ``handling.py`` or the function is missing. Nothing is caught here: an error of a broken tenant
+    module (ImportError, SyntaxError) reaches the ``except`` of ``_run_tenant_handler``.
+    """
+    # Convert tenant_name by replacing - with _
+    tenant_folder_name = tenant_name.replace("-", "_")
+    tenants_folder_path = Path(__file__).parent
+    tenant_folder_path = tenants_folder_path / tenant_folder_name
+
+    if not (tenant_folder_path.exists() and tenant_folder_path.is_dir()):
+        return None
+    # Look for handling.py file
+    handling_file_path = tenant_folder_path / "handling.py"
+    if not handling_file_path.exists():
+        return None
+    # Import the module dynamically
+    handling_module_name = f"tenants.{tenant_folder_name}.handling"
+    handling_module = importlib.import_module(handling_module_name)
+
+    # Look for prepare_context_for_{tenant_folder_name} function
+    tenant_handler_name = f"prepare_context_for_{tenant_folder_name}"
+    return getattr(handling_module, tenant_handler_name, None)
+
+
+async def _run_tenant_handler(message_context: MessageContext, tenant_name: str) -> bool:
+    """Find and await the tenant's handler; True only when it ran to completion.
+
+    False when the tenant has no handler, or when the lookup, the import or the handler raised: that
+    error is logged and swallowed, and the turn goes on with the dashboard tools. A ``ReplyReady``
+    raised by the handler propagates unchanged.
+    """
+    # Dynamic handler discovery - search in the tenants folder
+    try:
+        tenant_handler = _find_tenant_handler(tenant_name)
+        if tenant_handler is not None:
+            await tenant_handler(message_context)
+            return True
+    except ReplyReady:
+        raise
+
+    except Exception as error:
+        logger.error(f"Error during dynamic handler discovery for '{tenant_name}': {error}")
+    return False
+
+
+async def prepare_context_for_tenant(message_context: MessageContext, tenant_name: str) -> None:
     """
     Bind the tenant's configured tools, then route the request to the tenant's handler (if any).
 
     Args:
-        request: The MessageContext of the inbound message
+        message_context: The MessageContext of the inbound message
         tenant_name: Tenant identifier for routing
 
     Returns:
         None: Handlers process the request directly
     """
-    apply_tenant_tools(request)
+    add_tenant_selected_tools(message_context)
 
-    # Dynamic handler discovery - search in the tenants folder
-    try:
-        # Convert tenant_name by replacing - with _
-        folder_name = tenant_name.replace("-", "_")
-        tenants_dir = Path(__file__).parent
-        handler_dir = tenants_dir / folder_name
-
-        if handler_dir.exists() and handler_dir.is_dir():
-            # Look for handling.py file
-            handling_file = handler_dir / "handling.py"
-            if handling_file.exists():
-                # Import the module dynamically
-                module_path = f"tenants.{folder_name}.handling"
-                module = importlib.import_module(module_path)
-
-                # Look for handle_{tenant_name} function
-                handler_function_name = f"handle_{folder_name}"
-                if hasattr(module, handler_function_name):
-                    handler = getattr(module, handler_function_name)
-                    await handler(request)
-                    return
-    except ReplyReady as se:
-        raise se
-
-    except Exception as e:
-        logger.error(f"Error during dynamic handler discovery for '{tenant_name}': {e}")
+    if await _run_tenant_handler(message_context, tenant_name):
+        return
 
     # No custom code for this tenant: the dashboard tools (if any) are all it gets.
-    if not request["tool_names"]:
+    if not message_context["tool_names"]:
         logger.info("No tools for tenant '%s': the bot answers from the knowledge base only", tenant_name)

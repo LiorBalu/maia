@@ -9,31 +9,31 @@ from typing import Optional
 
 import pytz
 
-from maia.pipeline.tools.function_decorator import gpt_tool
+from maia.pipeline.tools.function_decorator import llm_tool
 from maia.pipeline.context import MessageContext
 from maia.models.customers import MeetingDocument
 from maia.models.google_accounts import GoogleShared
-from maia.utils.is_within_opening_hours import is_within_opening_hours
+from maia.utils.is_within_opening_hours import is_datetime_within_opening_hours
 from maia.api.calendar import (
-    get_available_time_slots_in_range,
-    get_calendar_service,
-    is_time_slot_available,
+    find_free_slots_in_range,
+    build_calendar_client,
+    is_slot_free_in_calendar,
 )
 
 logger = logging.getLogger(__name__)
 
-GOOGLE_DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%S"
+NAIVE_DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
-# Fixed behaviour (was a per-tenant variable on the st_schedule_event dynamic tool):
+# Fixed behaviour (was a per-tenant variable on the st_book_appointment dynamic tool):
 #   False — only the calendar marked ``default=True`` is used (falls back to any calendar).
 #   True  — every connected Google calendar of the tenant participates.
-INCLUDE_ALL_CALENDARS = False
+SHOULD_USE_ALL_CONNECTED_CALENDARS = False
 
 
-def _get_scheduling_calendars(tenant_name):
+def _resolve_scheduling_calendars(tenant_name):
     """Return the GoogleShared calendars used by the scheduling tools.
 
-    Controlled by ``INCLUDE_ALL_CALENDARS``:
+    Controlled by ``SHOULD_USE_ALL_CONNECTED_CALENDARS``:
       * Off (default) — only the calendar marked ``default=True`` is used.
       * On            — every connected Google calendar of the tenant participates;
                         availability is unioned and each booking is routed to the
@@ -42,295 +42,373 @@ def _get_scheduling_calendars(tenant_name):
     Always falls back to any calendar if neither path returns one, so a tenant
     with a single non-default calendar still works.
     """
-    include_all = INCLUDE_ALL_CALENDARS
+    should_use_all_calendars = SHOULD_USE_ALL_CONNECTED_CALENDARS
 
-    if include_all:
-        all_cals = list(GoogleShared.objects(tenant_name=tenant_name))
-        if all_cals:
-            return all_cals
+    if should_use_all_calendars:
+        connected_calendar_accounts = list(GoogleShared.objects(tenant_name=tenant_name))
+        if connected_calendar_accounts:
+            return connected_calendar_accounts
 
-    default = GoogleShared.objects(tenant_name=tenant_name, default=True).first()
-    if default:
-        return [default]
-    any_cal = GoogleShared.objects(tenant_name=tenant_name).first()
-    return [any_cal] if any_cal else []
+    default_calendar_account = GoogleShared.objects(tenant_name=tenant_name, default=True).first()
+    if default_calendar_account:
+        return [default_calendar_account]
+    fallback_calendar_account = GoogleShared.objects(tenant_name=tenant_name).first()
+    return [fallback_calendar_account] if fallback_calendar_account else []
 
 
-def _build_event_window(service, cal, date: str, time: str, duration_minutes: int):
+def _localize_requested_slot(calendar_client, calendar_account, requested_date: str, requested_time: str, event_duration_minutes: int):
     """Localize the requested date + time in the calendar's timezone; returns (timezone, start, end)."""
-    calendar_timezone = service.calendarList().get(calendarId=cal.email).execute().get("timeZone")
-    logger.info(f"[st_schedule_event] {cal.email} timezone: {calendar_timezone}")
-    tz = pytz.timezone(calendar_timezone)
-    datetime_obj = tz.localize(datetime.strptime(date + "T" + time, GOOGLE_DATETIME_FORMAT))
-    return calendar_timezone, datetime_obj, datetime_obj + timedelta(minutes=duration_minutes)
+    calendar_timezone_name = calendar_client.calendarList().get(calendarId=calendar_account.email).execute().get("timeZone")
+    logger.info(f"[st_book_appointment] {calendar_account.email} timezone: {calendar_timezone_name}")
+    calendar_timezone = pytz.timezone(calendar_timezone_name)
+    slot_start = calendar_timezone.localize(datetime.strptime(requested_date + "T" + requested_time, NAIVE_DATETIME_FORMAT))
+    return calendar_timezone_name, slot_start, slot_start + timedelta(minutes=event_duration_minutes)
 
 
-def _is_calendar_slot_usable(
-    service, cal, calendar_timezone, datetime_obj, end_datetime_obj
+def _check_slot_is_bookable(
+    calendar_client, calendar_account, calendar_timezone_name, slot_start, slot_end
 ) -> tuple[bool, str | None]:
     """Reject a slot that is in the past, outside the opening hours or busy; returns (usable, reason)."""
-    if datetime_obj < datetime.now(pytz.timezone(calendar_timezone)):
-        logger.info(f"[st_schedule_event] {cal.email}: REJECTED - time is in the past")
+    if slot_start < datetime.now(pytz.timezone(calendar_timezone_name)):
+        logger.info(f"[st_book_appointment] {calendar_account.email}: REJECTED - time is in the past")
         return False, "past"
 
     if (
-        cal.opening_hours
-        and len(cal.opening_hours) > 0
+        calendar_account.opening_hours
+        and len(calendar_account.opening_hours) > 0
         and (
-            not is_within_opening_hours(datetime_obj, cal.opening_hours)
-            or not is_within_opening_hours(end_datetime_obj, cal.opening_hours)
+            not is_datetime_within_opening_hours(slot_start, calendar_account.opening_hours)
+            or not is_datetime_within_opening_hours(slot_end, calendar_account.opening_hours)
         )
     ):
-        logger.info(f"[st_schedule_event] {cal.email}: REJECTED - closed")
+        logger.info(f"[st_book_appointment] {calendar_account.email}: REJECTED - closed")
         return False, "closed"
 
-    is_available = is_time_slot_available(
-        service=service,
-        calendar_id=cal.email,
-        start_time=datetime_obj.isoformat(),
-        end_time=end_datetime_obj.isoformat(),
-        timezone=calendar_timezone,
-        ignore_long_events=getattr(cal, "ignore_long_events", False),
+    is_slot_free = is_slot_free_in_calendar(
+        calendar_client=calendar_client,
+        google_calendar_id=calendar_account.email,
+        slot_start_iso=slot_start.isoformat(),
+        slot_end_iso=slot_end.isoformat(),
+        timezone_name=calendar_timezone_name,
+        should_ignore_long_events=getattr(calendar_account, "ignore_long_events", False),
     )
-    if not is_available:
-        logger.info(f"[st_schedule_event] {cal.email}: REJECTED - busy")
+    if not is_slot_free:
+        logger.info(f"[st_book_appointment] {calendar_account.email}: REJECTED - busy")
         return False, "busy"
 
     return True, None
 
 
-def _build_event_payload(
-    request: MessageContext,
-    title: str,
-    description: str,
-    fullname: str,
-    email: str,
-    phone_number: str,
-    calendar_timezone: str,
-    datetime_obj: datetime,
-    end_datetime_obj: datetime,
+def _compose_calendar_event_body(
+    message_context: MessageContext,
+    event_title: str,
+    event_description: str,
+    customer_full_name: str,
+    customer_email: str,
+    customer_sender_id: str,
+    calendar_timezone_name: str,
+    slot_start: datetime,
+    slot_end: datetime,
 ):
     """The Google Calendar event body: title, the customer's number as location, name / email / phone in the
     description, a Meet link, and the customer as attendee when an email is known.
     """
-    event_payload = {
-        "summary": title,
-        "location": request["sender_id"],
-        "description": description
+    event_body = {
+        "summary": event_title,
+        "location": message_context["sender_id"],
+        "description": event_description
         + "\n"
-        + f"שם: {fullname}"
+        + f"שם: {customer_full_name}"
         + "\n"
-        + f"אימייל: {email}"
+        + f"אימייל: {customer_email}"
         + "\n"
-        + f"טלפון: {phone_number}",
-        "start": {"dateTime": datetime_obj.strftime(GOOGLE_DATETIME_FORMAT), "timeZone": calendar_timezone},
-        "end": {"dateTime": end_datetime_obj.strftime(GOOGLE_DATETIME_FORMAT), "timeZone": calendar_timezone},
+        + f"טלפון: {customer_sender_id}",
+        "start": {"dateTime": slot_start.strftime(NAIVE_DATETIME_FORMAT), "timeZone": calendar_timezone_name},
+        "end": {"dateTime": slot_end.strftime(NAIVE_DATETIME_FORMAT), "timeZone": calendar_timezone_name},
         "conferenceData": {
             "createRequest": {"requestId": str(uuid.uuid4()), "conferenceSolutionKey": {"type": "hangoutsMeet"}}
         },
     }
-    if request["platform"] == "email":
-        event_payload["attendees"] = [{"email": request["sender_id"]}]
-    elif email:
-        event_payload["attendees"] = [{"email": email}]
-    return event_payload
+    if message_context["platform"] == "email":
+        event_body["attendees"] = [{"email": message_context["sender_id"]}]
+    elif customer_email:
+        event_body["attendees"] = [{"email": customer_email}]
+    return event_body
 
 
-def _persist_created_meeting(
-    request: MessageContext, event: dict, datetime_obj: datetime, end_datetime_obj: datetime
+def _record_meeting_on_customer(
+    message_context: MessageContext, calendar_event: dict, slot_start: datetime, slot_end: datetime
 ) -> None:
     """Record the booked event on the customer (meetings list) and save."""
-    request["customer"].meetings.append(
+    message_context["customer"].meetings.append(
         MeetingDocument(
-            meeting_id=event["id"],
-            meeting_url=event["htmlLink"],
-            start_time=datetime_obj.strftime(GOOGLE_DATETIME_FORMAT),
-            end_time=end_datetime_obj.strftime(GOOGLE_DATETIME_FORMAT),
+            meeting_id=calendar_event["id"],
+            meeting_url=calendar_event["htmlLink"],
+            start_time=slot_start.strftime(NAIVE_DATETIME_FORMAT),
+            end_time=slot_end.strftime(NAIVE_DATETIME_FORMAT),
             status="confirmed",
         )
     )
-    request["customer"].save()
+    message_context["customer"].save()
 
 
-def _create_event_in_first_available_calendar(
-    request: MessageContext,
-    calendars,
-    date: str,
-    time: str,
-    title: str,
-    duration_minutes: int,
-    email: str,
-    fullname: str,
-    description: str,
-    phone_number: str,
+def _insert_event_and_record_meeting(
+    message_context: MessageContext,
+    calendar_client,
+    calendar_account,
+    event_body: dict,
+    slot_start: datetime,
+    slot_end: datetime,
+) -> dict:
+    """Create the event in this calendar (Meet link, invitations sent), record it on the customer and return it."""
+    calendar_event = (
+        calendar_client.events()
+        .insert(calendarId=calendar_account.email, body=event_body, conferenceDataVersion=1, sendUpdates="all")
+        .execute()
+    )
+    _record_meeting_on_customer(message_context, calendar_event, slot_start, slot_end)
+    logger.info(f"[st_book_appointment] {calendar_account.email}: event created {calendar_event['id']} — stopping (single-calendar booking)")
+    return calendar_event
+
+
+def _book_event_in_first_free_calendar(
+    message_context: MessageContext,
+    calendar_accounts,
+    requested_date: str,
+    requested_time: str,
+    event_title: str,
+    event_duration_minutes: int,
+    customer_email: str,
+    customer_full_name: str,
+    event_description: str,
+    customer_sender_id: str,
 ):
     """Try the calendars in order and create the event in the first one where the slot is usable; returns ((calendar,
     event) or None, rejection reasons).
     """
-    rejection_reasons = []
+    slot_rejection_reasons = []
 
-    for cal in calendars:
-        logger.info(f"\n[st_schedule_event] --- Processing calendar: {cal.email} ---")
-        service = get_calendar_service(cal.access_token, cal.refresh_token)
-        calendar_timezone, datetime_obj, end_datetime_obj = _build_event_window(
-            service, cal, date, time, duration_minutes
+    for calendar_account in calendar_accounts:
+        logger.info(f"\n[st_book_appointment] --- Processing calendar: {calendar_account.email} ---")
+        calendar_client = build_calendar_client(calendar_account.access_token, calendar_account.refresh_token)
+        calendar_timezone_name, slot_start, slot_end = _localize_requested_slot(
+            calendar_client, calendar_account, requested_date, requested_time, event_duration_minutes
         )
-        is_usable, reason = _is_calendar_slot_usable(service, cal, calendar_timezone, datetime_obj, end_datetime_obj)
-        if not is_usable:
-            rejection_reasons.append(reason)
+        is_bookable, rejection_reason = _check_slot_is_bookable(
+            calendar_client, calendar_account, calendar_timezone_name, slot_start, slot_end
+        )
+        if not is_bookable:
+            slot_rejection_reasons.append(rejection_reason)
             continue
 
-        event_payload = _build_event_payload(
-            request,
-            title,
-            description,
-            fullname,
-            email,
-            phone_number,
-            calendar_timezone,
-            datetime_obj,
-            end_datetime_obj,
+        event_body = _compose_calendar_event_body(
+            message_context,
+            event_title,
+            event_description,
+            customer_full_name,
+            customer_email,
+            customer_sender_id,
+            calendar_timezone_name,
+            slot_start,
+            slot_end,
         )
-        event = (
-            service.events()
-            .insert(calendarId=cal.email, body=event_payload, conferenceDataVersion=1, sendUpdates="all")
-            .execute()
+        calendar_event = _insert_event_and_record_meeting(
+            message_context, calendar_client, calendar_account, event_body, slot_start, slot_end
         )
-        _persist_created_meeting(request, event, datetime_obj, end_datetime_obj)
-        logger.info(f"[st_schedule_event] {cal.email}: event created {event['id']} — stopping (single-calendar booking)")
-        return (cal, event), rejection_reasons
+        return (calendar_account, calendar_event), slot_rejection_reasons
 
-    return None, rejection_reasons
+    return None, slot_rejection_reasons
 
 
-def _format_schedule_rejection(rejection_reasons: list[str]) -> str:
+def _compose_booking_rejection_message(slot_rejection_reasons: list[str]) -> str:
     """Text for the model when no calendar could take the slot (past / closed / busy)."""
-    if rejection_reasons and all(reason == "past" for reason in rejection_reasons):
+    if slot_rejection_reasons and all(reason == "past" for reason in slot_rejection_reasons):
         return "This time slot is not available because it's in the past"
-    if rejection_reasons and all(reason == "closed" for reason in rejection_reasons):
+    if slot_rejection_reasons and all(reason == "closed" for reason in slot_rejection_reasons):
         return "This time slot is not available because the agency is closed"
     return "This time slot is not available"
 
 
-def _collect_user_future_events(calendars, user_location: str):
+def _collect_customer_upcoming_events(calendar_accounts, customer_sender_id: str):
     """(calendar, service, event) of every confirmed future event whose location is the customer's number."""
-    now_google_format = datetime.now(timezone.utc).isoformat() + "Z"
-    filtered_pairs = []
+    current_time_iso = datetime.now(timezone.utc).isoformat() + "Z"
+    customer_event_triples = []
 
-    for cal in calendars:
-        service = get_calendar_service(cal.access_token, cal.refresh_token)
-        events = service.events().list(calendarId=cal.email).execute()
-        filtered_pairs.extend(
-            (cal, service, event)
-            for event in events.get("items", [])
-            if event.get("status") == "confirmed"
-            and event.get("location") == user_location
-            and event.get("start", {}).get("dateTime", now_google_format) > now_google_format
+    for calendar_account in calendar_accounts:
+        calendar_client = build_calendar_client(calendar_account.access_token, calendar_account.refresh_token)
+        events_response = calendar_client.events().list(calendarId=calendar_account.email).execute()
+        customer_event_triples.extend(
+            (calendar_account, calendar_client, calendar_event)
+            for calendar_event in events_response.get("items", [])
+            if calendar_event.get("status") == "confirmed"
+            and calendar_event.get("location") == customer_sender_id
+            and calendar_event.get("start", {}).get("dateTime", current_time_iso) > current_time_iso
         )
 
-    return filtered_pairs
+    return customer_event_triples
 
 
-def _find_customer_event_at(calendars, user_location: str, start_dt: datetime):
-    """The customer's own confirmed event that starts exactly at `start_dt`, if any.
+def _find_customer_event_starting_at(calendar_accounts, customer_sender_id: str, slot_start: datetime):
+    """The customer's own confirmed event that starts exactly at `slot_start`, if any.
 
     Used to keep booking idempotent: the model tends to call the booking tool again when the
     customer answers "yes" or "thanks" after the appointment was already created.
     """
-    for cal, _service, event in _collect_user_future_events(calendars, user_location):
-        start = event.get("start", {}).get("dateTime")
-        if not start:
+    for calendar_account, _calendar_client, calendar_event in _collect_customer_upcoming_events(
+        calendar_accounts, customer_sender_id
+    ):
+        event_start_iso = calendar_event.get("start", {}).get("dateTime")
+        if not event_start_iso:
             continue
         try:
-            if datetime.fromisoformat(start) == start_dt:
-                return cal, event
+            if datetime.fromisoformat(event_start_iso) == slot_start:
+                return calendar_account, calendar_event
         except ValueError:
             continue
     return None, None
 
 
-def _mark_customer_meeting_cancelled(customer, event_id: str) -> None:
+def _record_meeting_cancellation(customer, calendar_event_id: str) -> None:
     """Set the status of the customer's stored meeting to cancelled."""
     for meeting in customer.meetings:
-        if meeting.meeting_id == event_id:
+        if meeting.meeting_id == calendar_event_id:
             meeting.status = "cancelled"
             customer.save()
             break
 
 
-def _delete_calendar_event(cal, service, event_to_cancel, customer) -> None:
+def _delete_event_and_record_cancellation(calendar_account, calendar_client, target_event, customer) -> None:
     """Delete the event from Google Calendar and mark the customer's meeting cancelled."""
-    service.events().delete(calendarId=cal.email, eventId=event_to_cancel["id"]).execute()
-    logger.info(f"[st_cancel_event] Event deleted in {cal.email}: {event_to_cancel.get('htmlLink')}")
-    _mark_customer_meeting_cancelled(customer, event_to_cancel["id"])
+    calendar_client.events().delete(calendarId=calendar_account.email, eventId=target_event["id"]).execute()
+    logger.info(f"[st_cancel_appointment] Event deleted in {calendar_account.email}: {target_event.get('htmlLink')}")
+    _record_meeting_cancellation(customer, target_event["id"])
 
 
-def _find_calendar_event(calendars, event_id: str):
+def _find_event_across_calendars(calendar_accounts, calendar_event_id: str):
     """Look an event id up in each calendar; returns (calendar, service, event), or Nones."""
-    for cal in calendars:
-        service = get_calendar_service(cal.access_token, cal.refresh_token)
+    for calendar_account in calendar_accounts:
+        calendar_client = build_calendar_client(calendar_account.access_token, calendar_account.refresh_token)
         try:
-            event = service.events().get(calendarId=cal.email, eventId=event_id).execute()
-            if event:
-                logger.info(f"[st_reschedule_event] Event {event_id} found in {cal.email}")
-                return cal, service, event
-        except Exception as e:
-            logger.error(f"[st_reschedule_event] Event not in {cal.email}: {e}")
+            calendar_event = calendar_client.events().get(calendarId=calendar_account.email, eventId=calendar_event_id).execute()
+            if calendar_event:
+                logger.info(f"[st_reschedule_appointment] Event {calendar_event_id} found in {calendar_account.email}")
+                return calendar_account, calendar_client, calendar_event
+        except Exception as error:
+            logger.error(f"[st_reschedule_appointment] Event not in {calendar_account.email}: {error}")
     return None, None, None
 
 
-def _build_reschedule_window(target_service, target_cal, new_date: str, new_time: str, duration_minutes: int):
+def _localize_rescheduled_slot(target_calendar_client, target_calendar_account, rescheduled_date: str, rescheduled_time: str, event_duration_minutes: int):
     """Localize the new date + time in the target calendar's timezone; returns (timezone, start, end)."""
-    calendar_timezone = target_service.calendarList().get(calendarId=target_cal.email).execute().get("timeZone")
-    tz = pytz.timezone(calendar_timezone)
-    datetime_obj = tz.localize(datetime.strptime(new_date + "T" + new_time, GOOGLE_DATETIME_FORMAT))
-    return calendar_timezone, datetime_obj, datetime_obj + timedelta(minutes=duration_minutes)
+    calendar_timezone_name = target_calendar_client.calendarList().get(calendarId=target_calendar_account.email).execute().get("timeZone")
+    calendar_timezone = pytz.timezone(calendar_timezone_name)
+    slot_start = calendar_timezone.localize(datetime.strptime(rescheduled_date + "T" + rescheduled_time, NAIVE_DATETIME_FORMAT))
+    return calendar_timezone_name, slot_start, slot_start + timedelta(minutes=event_duration_minutes)
 
 
-def _validate_reschedule_slot(
-    target_service, target_cal, calendar_timezone, datetime_obj, end_datetime_obj
+def _find_rescheduled_slot_conflict(
+    target_calendar_client, target_calendar_account, calendar_timezone_name, slot_start, slot_end
 ) -> str | None:
     """Message for the model when the new slot is outside the opening hours or busy; None when it is free."""
-    if target_cal.opening_hours:
-        starts_open = is_within_opening_hours(datetime_obj, target_cal.opening_hours)
-        ends_open = is_within_opening_hours(end_datetime_obj, target_cal.opening_hours)
-        if not starts_open or not ends_open:
+    if target_calendar_account.opening_hours:
+        is_start_within_hours = is_datetime_within_opening_hours(slot_start, target_calendar_account.opening_hours)
+        is_end_within_hours = is_datetime_within_opening_hours(slot_end, target_calendar_account.opening_hours)
+        if not is_start_within_hours or not is_end_within_hours:
             return "This time slot is not available because the agency is closed."
 
-    if not is_time_slot_available(
-        service=target_service,
-        calendar_id=target_cal.email,
-        start_time=datetime_obj.isoformat(),
-        end_time=end_datetime_obj.isoformat(),
-        timezone=calendar_timezone,
-        ignore_long_events=getattr(target_cal, "ignore_long_events", False),
+    if not is_slot_free_in_calendar(
+        calendar_client=target_calendar_client,
+        google_calendar_id=target_calendar_account.email,
+        slot_start_iso=slot_start.isoformat(),
+        slot_end_iso=slot_end.isoformat(),
+        timezone_name=calendar_timezone_name,
+        should_ignore_long_events=getattr(target_calendar_account, "ignore_long_events", False),
     ):
         return "This time slot is not available."
     return None
 
 
-def _update_customer_rescheduled_meeting(customer, event_id: str, datetime_obj, end_datetime_obj) -> None:
+def _record_meeting_new_times(customer, calendar_event_id: str, slot_start, slot_end) -> None:
     """Update the times of the customer's stored meeting after a reschedule."""
     for meeting in customer.meetings:
-        if meeting.meeting_id == event_id:
-            meeting.start_time = datetime_obj.strftime(GOOGLE_DATETIME_FORMAT)
-            meeting.end_time = end_datetime_obj.strftime(GOOGLE_DATETIME_FORMAT)
+        if meeting.meeting_id == calendar_event_id:
+            meeting.start_time = slot_start.strftime(NAIVE_DATETIME_FORMAT)
+            meeting.end_time = slot_end.strftime(NAIVE_DATETIME_FORMAT)
             meeting.status = "confirmed"
             customer.save()
             break
 
 
-def _apply_calendar_reschedule(
-    target_service, target_cal, event_id: str, event: dict, calendar_timezone: str, datetime_obj, end_datetime_obj
+def _move_event_to_slot(
+    target_calendar_client, target_calendar_account, calendar_event_id: str, calendar_event: dict, calendar_timezone_name: str, slot_start, slot_end
 ):
     """Write the new start / end on the Google Calendar event."""
-    event["start"] = {"dateTime": datetime_obj.strftime(GOOGLE_DATETIME_FORMAT), "timeZone": calendar_timezone}
-    event["end"] = {"dateTime": end_datetime_obj.strftime(GOOGLE_DATETIME_FORMAT), "timeZone": calendar_timezone}
-    return target_service.events().update(calendarId=target_cal.email, eventId=event_id, body=event).execute()
+    calendar_event["start"] = {"dateTime": slot_start.strftime(NAIVE_DATETIME_FORMAT), "timeZone": calendar_timezone_name}
+    calendar_event["end"] = {"dateTime": slot_end.strftime(NAIVE_DATETIME_FORMAT), "timeZone": calendar_timezone_name}
+    return target_calendar_client.events().update(calendarId=target_calendar_account.email, eventId=calendar_event_id, body=calendar_event).execute()
 
 
-@gpt_tool
-async def st_schedule_event(
+def _log_booking_call(
+    message_context: MessageContext,
+    requested_date: str,
+    requested_time: str,
+    event_duration_minutes: int,
+    customer_full_name: str,
+    customer_email: str,
+) -> None:
+    """The entry log lines of st_book_appointment: the tenant and the requested booking."""
+    logger.info(f"\n{'#' * 60}")
+    logger.info("[st_book_appointment] CALLED")
+    logger.info(f"[st_book_appointment] tenant_name: {message_context['tenant_name']}")
+    logger.info(f"[st_book_appointment] chosen_date: {requested_date}")
+    logger.info(f"[st_book_appointment] chosen_time: {requested_time}")
+    logger.info(f"[st_book_appointment] duration_minutes: {event_duration_minutes}")
+    logger.info(f"[st_book_appointment] fullname: {customer_full_name}")
+    logger.info(f"[st_book_appointment] email: {customer_email}")
+
+
+def _find_duplicate_booking(
+    calendar_accounts, customer_sender_id: str, requested_date: str, requested_time: str, event_duration_minutes: int
+):
+    """The customer's confirmed event that already starts at the requested time, looked up calendar by calendar
+    (each in its own timezone); returns (calendar, event), or Nones.
+    """
+    for calendar_account in calendar_accounts:
+        calendar_client = build_calendar_client(calendar_account.access_token, calendar_account.refresh_token)
+        _, requested_start, _ = _localize_requested_slot(
+            calendar_client, calendar_account, requested_date, requested_time, event_duration_minutes
+        )
+        _, existing_event = _find_customer_event_starting_at([calendar_account], customer_sender_id, requested_start)
+        if existing_event:
+            return calendar_account, existing_event
+    return None, None
+
+
+def _compose_booking_outcome_reply(
+    booked_calendar_and_event,
+    slot_rejection_reasons: list[str],
+    calendar_count: int,
+    event_title: str,
+    requested_datetime_text: str,
+) -> str:
+    """Text for the model after the booking attempt: why no calendar took the slot, or the confirmation with the
+    event id.
+    """
+    if not booked_calendar_and_event:
+        logger.info(f"[st_book_appointment] No event created across {calendar_count} calendar(s). Reasons: {slot_rejection_reasons}")
+        logger.info(f"{'#' * 60}\n")
+        return _compose_booking_rejection_message(slot_rejection_reasons)
+
+    logger.info(f"[st_book_appointment] event created in {booked_calendar_and_event[0].email}")
+    logger.info(f"{'#' * 60}\n")
+    return (
+        f"Appointment created and confirmed: '{event_title}' at {requested_datetime_text} "
+        f"(event_id {booked_calendar_and_event[1]['id']}). Do not create it again."
+    )
+
+
+@llm_tool
+async def st_book_appointment(
     request: MessageContext,
     date: str,
     time: str,
@@ -354,69 +432,84 @@ async def st_schedule_event(
     fullname = fullname or ""
     email = email or ""
     description = description or ""
-    phone_number = request["sender_id"]
+    customer_sender_id = request["sender_id"]
 
-    logger.info(f"\n{'#' * 60}")
-    logger.info("[st_schedule_event] CALLED")
-    logger.info(f"[st_schedule_event] tenant_name: {request['tenant_name']}")
-    logger.info(f"[st_schedule_event] chosen_date: {date}")
-    logger.info(f"[st_schedule_event] chosen_time: {time}")
-    logger.info(f"[st_schedule_event] duration_minutes: {duration_minutes}")
-    logger.info(f"[st_schedule_event] fullname: {fullname}")
-    logger.info(f"[st_schedule_event] email: {email}")
+    _log_booking_call(request, date, time, duration_minutes, fullname, email)
 
-    calendars = _get_scheduling_calendars(request["tenant_name"])
-    if not calendars:
-        logger.info("[st_schedule_event] No calendar for create event")
+    calendar_accounts = _resolve_scheduling_calendars(request["tenant_name"])
+    if not calendar_accounts:
+        logger.info("[st_book_appointment] No calendar for create event")
         return "We can't create an event for the user"
 
-    logger.info(f"[st_schedule_event] {len(calendars)} scheduling calendar(s): {[c.email for c in calendars]}")
+    logger.info(f"[st_book_appointment] {len(calendar_accounts)} scheduling calendar(s): {[calendar_account.email for calendar_account in calendar_accounts]}")
 
     # Idempotency: never create the same appointment twice for the same customer.
-    for cal in calendars:
-        service = get_calendar_service(cal.access_token, cal.refresh_token)
-        _, requested_start, _ = _build_event_window(service, cal, date, time, duration_minutes)
-        _, existing_event = _find_customer_event_at([cal], phone_number, requested_start)
-        if existing_event:
-            logger.info(f"[st_schedule_event] {cal.email}: appointment {existing_event['id']} already exists, not created again")
-            logger.info(f"{'#' * 60}\n")
-            return (
-                f"This appointment already exists and is confirmed: '{existing_event.get('summary')}' at {date}T{time} "
-                f"(event_id {existing_event['id']}). Do not create it again; just confirm it to the customer."
-            )
-
-    datetime_str_user = date + "T" + time
-    created_event, rejection_reasons = _create_event_in_first_available_calendar(
-        request=request,
-        calendars=calendars,
-        date=date,
-        time=time,
-        title=title,
-        duration_minutes=duration_minutes,
-        email=email,
-        fullname=fullname,
-        description=description,
-        phone_number=phone_number,
+    duplicate_calendar_account, existing_event = _find_duplicate_booking(
+        calendar_accounts, customer_sender_id, date, time, duration_minutes
     )
-
-    if not created_event:
-        logger.info(f"[st_schedule_event] No event created across {len(calendars)} calendar(s). Reasons: {rejection_reasons}")
+    if existing_event:
+        logger.info(f"[st_book_appointment] {duplicate_calendar_account.email}: appointment {existing_event['id']} already exists, not created again")
         logger.info(f"{'#' * 60}\n")
-        return _format_schedule_rejection(rejection_reasons)
+        return (
+            f"This appointment already exists and is confirmed: '{existing_event.get('summary')}' at {date}T{time} "
+            f"(event_id {existing_event['id']}). Do not create it again; just confirm it to the customer."
+        )
 
-    logger.info(f"[st_schedule_event] event created in {created_event[0].email}")
-    logger.info(f"{'#' * 60}\n")
-    return (
-        f"Appointment created and confirmed: '{title}' at {datetime_str_user} "
-        f"(event_id {created_event[1]['id']}). Do not create it again."
+    requested_datetime_text = date + "T" + time
+    booked_calendar_and_event, slot_rejection_reasons = _book_event_in_first_free_calendar(
+        message_context=request,
+        calendar_accounts=calendar_accounts,
+        requested_date=date,
+        requested_time=time,
+        event_title=title,
+        event_duration_minutes=duration_minutes,
+        customer_email=email,
+        customer_full_name=fullname,
+        event_description=description,
+        customer_sender_id=customer_sender_id,
+    )
+    return _compose_booking_outcome_reply(
+        booked_calendar_and_event, slot_rejection_reasons, len(calendar_accounts), title, requested_datetime_text
     )
 
 
 # --------------------------------------------------------
 
 
-@gpt_tool
-async def st_cancel_event(request: MessageContext, event_id: Optional[str] = None) -> str:
+def _choose_event_to_cancel(customer_event_triples, calendar_event_id: Optional[str]):
+    """(calendar, client, event) to cancel and None, or None and the text for the model when there is no single
+    event to cancel: the id is not one of the customer's events, several events and no id, or no event at all.
+    """
+    customer_events = [calendar_event for _, _, calendar_event in customer_event_triples]
+
+    # In case the user chose a specific event from the list
+    if calendar_event_id:
+        triple_to_cancel = next(
+            (
+                (calendar_account, calendar_client, calendar_event)
+                for calendar_account, calendar_client, calendar_event in customer_event_triples
+                if calendar_event["id"] == calendar_event_id
+            ),
+            None,
+        )
+        if not triple_to_cancel:
+            logger.info("[st_cancel_appointment] This event doesn't belong to the user.")
+            return None, "This event doesn't belong to the user. Let him choose from the list."
+        return triple_to_cancel, None
+
+    # In case the user asks to cancel event but didn't provide id
+    if len(customer_event_triples) > 1:
+        logger.info(" ".join(str(part) for part in ("[st_cancel_appointment] The user have multiple events: ", customer_events)))
+        return None, "The user have multiple events, let him choose the one he wants to cancel: " + str(customer_events)
+    if len(customer_event_triples) == 1:
+        return customer_event_triples[0], None
+
+    logger.info("[st_cancel_appointment] We don't have any event for the user to cancel")
+    return None, "We don't have any event for the user to cancel"
+
+
+@llm_tool
+async def st_cancel_appointment(request: MessageContext, event_id: Optional[str] = None) -> str:
     """
     Cancels a scheduled event for the user.
 
@@ -424,100 +517,148 @@ async def st_cancel_event(request: MessageContext, event_id: Optional[str] = Non
     """
     # remove event for the user we not need to delete reminder,
     # because if the use send message, is automatically deleted
-    calendars = _get_scheduling_calendars(request["tenant_name"])
-    if not calendars:
-        logger.info("[st_cancel_event] No calendar for cancel event")
+    calendar_accounts = _resolve_scheduling_calendars(request["tenant_name"])
+    if not calendar_accounts:
+        logger.info("[st_cancel_appointment] No calendar for cancel event")
         return "We can't cancel the event for the user"
 
     # list of (calendar, service, event) for every confirmed future event at the user's location
-    all_filtered_pairs = _collect_user_future_events(calendars, request["sender_id"])
+    customer_event_triples = _collect_customer_upcoming_events(calendar_accounts, request["sender_id"])
 
-    all_filtered_events = [ev for _, _, ev in all_filtered_pairs]
-    is_cancelled = False
+    triple_to_cancel, refusal_reply = _choose_event_to_cancel(customer_event_triples, event_id)
+    if refusal_reply:
+        return refusal_reply
 
-    # In case the user chose a specific event from the list
-    if event_id:
-        target = next(((c, s, e) for c, s, e in all_filtered_pairs if e["id"] == event_id), None)
-        if not target:
-            logger.info("[st_cancel_event] This event doesn't belong to the user.")
-            return "This event doesn't belong to the user. Let him choose from the list."
-        cal, service, event_to_cancel = target
-        _delete_calendar_event(cal, service, event_to_cancel, request["customer"])
-        is_cancelled = True
-
-    else:  # In case the user asks to cancel event but didn't provide id
-        if len(all_filtered_pairs) > 1:
-            logger.info(" ".join(str(part) for part in ("[st_cancel_event] The user have multiple events: ", all_filtered_events)))
-            return "The user have multiple events, let him choose the one he wants to cancel: " + str(
-                all_filtered_events
-            )
-        if len(all_filtered_pairs) == 1:
-            cal, service, event_to_cancel = all_filtered_pairs[0]
-            _delete_calendar_event(cal, service, event_to_cancel, request["customer"])
-            is_cancelled = True
-
-    if len(all_filtered_pairs) == 0:
-        logger.info("[st_cancel_event] We don't have any event for the user to cancel")
-        return "We don't have any event for the user to cancel"
-
-    if is_cancelled:
-        logger.info("[st_cancel_event] Ok, we have canceled the event for the user")
-        return "Ok, we have canceled the event for the user"
+    calendar_account, calendar_client, event_to_cancel = triple_to_cancel
+    _delete_event_and_record_cancellation(calendar_account, calendar_client, event_to_cancel, request["customer"])
+    logger.info("[st_cancel_appointment] Ok, we have canceled the event for the user")
+    return "Ok, we have canceled the event for the user"
 
 
 # --------------------------------------------------------
 
 
-@gpt_tool
-async def st_get_event_details(request: MessageContext, event_id: Optional[str] = None) -> str:
+def _fetch_customer_upcoming_events(calendar_accounts, customer_sender_id: str) -> list[dict]:
+    """Every confirmed future event whose location is the customer's number, listed from now on in each calendar."""
+    current_time_iso = datetime.now(timezone.utc).isoformat() + "Z"
+    upcoming_events = []
+
+    for calendar_account in calendar_accounts:
+        calendar_client = build_calendar_client(calendar_account.access_token, calendar_account.refresh_token)
+        events_response = calendar_client.events().list(calendarId=calendar_account.email, timeMin=datetime.now().isoformat() + "Z").execute()
+        upcoming_events.extend(
+            [
+                calendar_event
+                for calendar_event in events_response.get("items", [])
+                if calendar_event.get("status") == "confirmed"
+                and calendar_event.get("location") == customer_sender_id
+                and calendar_event.get("start", {}).get("dateTime", current_time_iso) > current_time_iso
+            ]
+        )
+
+    return upcoming_events
+
+
+def _compose_event_details_reply(upcoming_events: list[dict], calendar_event_id: Optional[str]) -> str:
+    """Text for the model: the event chosen by id, all of them when there are several, none, or the only one."""
+    # In case the user chose a specific event from the list to get more details about
+    if calendar_event_id:
+        for calendar_event in upcoming_events:
+            if calendar_event_id == calendar_event["id"]:
+                logger.info(" ".join(str(part) for part in ("The event details: ", calendar_event)))
+                return "The event details: " + str(calendar_event)
+    if len(upcoming_events) > 1:
+        logger.info(" ".join(str(part) for part in ("The user have multiple events.", upcoming_events)))
+        return "The user have multiple events: " + str(upcoming_events)
+    if len(upcoming_events) == 0:
+        logger.info("The user have no events.")
+        return "The user have no events."
+    else:
+        logger.info(" ".join(str(part) for part in ("The event details: ", upcoming_events)))
+        return "The event details: " + str(upcoming_events)
+
+
+@llm_tool
+async def st_find_customer_appointments(request: MessageContext, event_id: Optional[str] = None) -> str:
     """
     Retrieve details about a scheduled event.
 
     event_id: The unique identifier of the event to retrieve details for
     """
-    calendars = _get_scheduling_calendars(request["tenant_name"])
-    if not calendars:
-        logger.info("[st_get_event_details] No calendar for events")
+    calendar_accounts = _resolve_scheduling_calendars(request["tenant_name"])
+    if not calendar_accounts:
+        logger.info("[st_find_customer_appointments] No calendar for events")
         return "There's no events for the user"
 
-    now_google_format = datetime.now(timezone.utc).isoformat() + "Z"
-    filtered_events = []
-
-    for cal in calendars:
-        service = get_calendar_service(cal.access_token, cal.refresh_token)
-        events = service.events().list(calendarId=cal.email, timeMin=datetime.now().isoformat() + "Z").execute()
-        filtered_events.extend(
-            [
-                event
-                for event in events.get("items", [])
-                if event.get("status") == "confirmed"
-                and event.get("location") == request["sender_id"]
-                and event.get("start", {}).get("dateTime", now_google_format) > now_google_format
-            ]
-        )
-
-    # In case the user chose a specific event from the list to get more details about
-    if event_id:
-        for event in filtered_events:
-            if event_id == event["id"]:
-                logger.info(" ".join(str(part) for part in ("The event details: ", event)))
-                return "The event details: " + str(event)
-    if len(filtered_events) > 1:
-        logger.info(" ".join(str(part) for part in ("The user have multiple events.", filtered_events)))
-        return "The user have multiple events: " + str(filtered_events)
-    if len(filtered_events) == 0:
-        logger.info("The user have no events.")
-        return "The user have no events."
-    else:
-        logger.info(" ".join(str(part) for part in ("The event details: ", filtered_events)))
-        return "The event details: " + str(filtered_events)
+    upcoming_events = _fetch_customer_upcoming_events(calendar_accounts, request["sender_id"])
+    return _compose_event_details_reply(upcoming_events, event_id)
 
 
 # --------------------------------------------------------
 
 
-@gpt_tool
-async def st_check_availability_by_date_and_time(
+def _validate_slot_request_format(requested_date: str, requested_time: str) -> str | None:
+    """Text for the model when the date is not YYYY-MM-DD or the time is not HH:MM:SS; None when both are well-formed."""
+    # Validate date format - must be YYYY-MM-DD
+    date_format_pattern = r"^\d{4}-\d{2}-\d{2}$"
+    time_format_pattern = r"^\d{2}:\d{2}:\d{2}$"
+
+    if not requested_date or not re.match(date_format_pattern, str(requested_date)):
+        logger.error(f"[ERROR st_check_slot_availability] Invalid date format: {requested_date}")
+        return f"Invalid date format: '{requested_date}'. Please provide date in YYYY-MM-DD format (e.g., 2026-01-20)."
+    if not requested_time or not re.match(time_format_pattern, str(requested_time)):
+        logger.error(f"[ERROR st_check_slot_availability] Invalid time format: {requested_time}")
+        return f"Invalid time format: '{requested_time}'. Please provide time in HH:MM:SS format (e.g., 14:30:00)."
+    return None
+
+
+def _check_calendar_slot_for_customer(
+    calendar_account, customer_sender_id: str, requested_date: str, requested_time: str, event_duration_minutes: int
+) -> str | None:
+    """Text for the model when this calendar has the slot free, or already holds the customer's own appointment at
+    that start; None when the calendar is closed or busy then, so the next calendar is tried.
+    """
+    calendar_client = build_calendar_client(calendar_account.access_token, calendar_account.refresh_token)
+    calendar_timezone_name = calendar_client.calendarList().get(calendarId=calendar_account.email).execute().get("timeZone")
+
+    calendar_timezone = pytz.timezone(calendar_timezone_name)
+    slot_start = calendar_timezone.localize(datetime.strptime(requested_date + "T" + requested_time, NAIVE_DATETIME_FORMAT))
+    slot_end = slot_start + timedelta(minutes=event_duration_minutes)
+
+    if (
+        calendar_account.opening_hours
+        and len(calendar_account.opening_hours) > 0
+        and (
+            not is_datetime_within_opening_hours(slot_start, calendar_account.opening_hours)
+            or not is_datetime_within_opening_hours(slot_end, calendar_account.opening_hours)
+        )
+    ):
+        logger.info(f"[st_check_slot_availability] {calendar_account.email}: closed at this time")
+        return None
+
+    if is_slot_free_in_calendar(
+        calendar_client=calendar_client,
+        google_calendar_id=calendar_account.email,
+        slot_start_iso=slot_start.isoformat(),
+        slot_end_iso=slot_end.isoformat(),
+        timezone_name=calendar_timezone_name,
+        should_ignore_long_events=getattr(calendar_account, "ignore_long_events", False),
+    ):
+        logger.info(f"[st_check_slot_availability] {calendar_account.email}: AVAILABLE")
+        return "This time slot is available"
+    _, own_event = _find_customer_event_starting_at([calendar_account], customer_sender_id, slot_start)
+    if own_event:
+        logger.info(f"[st_check_slot_availability] {calendar_account.email}: taken by the customer's own {own_event['id']}")
+        return (
+            f"This time is already booked for this customer: their own appointment '{own_event.get('summary')}' "
+            f"(event_id {own_event['id']}). It is confirmed; do not book it again."
+        )
+    logger.info(f"[st_check_slot_availability] {calendar_account.email}: busy")
+    return None
+
+
+@llm_tool
+async def st_check_slot_availability(
     request: MessageContext, date: str, time: str, duration_minutes: int = 30
 ) -> str:
     """
@@ -527,70 +668,62 @@ async def st_check_availability_by_date_and_time(
     time: The specific time for which to check availability, formatted as HH:MM:SS
     duration_minutes: Duration of the event in minutes
     """
-    # Validate date format - must be YYYY-MM-DD
-    date_pattern = r"^\d{4}-\d{2}-\d{2}$"
-    time_pattern = r"^\d{2}:\d{2}:\d{2}$"
+    if format_error_reply := _validate_slot_request_format(date, time):
+        return format_error_reply
 
-    if not date or not re.match(date_pattern, str(date)):
-        logger.error(f"[ERROR st_check_availability_by_date_and_time] Invalid date format: {date}")
-        return f"Invalid date format: '{date}'. Please provide date in YYYY-MM-DD format (e.g., 2026-01-20)."
-    if not time or not re.match(time_pattern, str(time)):
-        logger.error(f"[ERROR st_check_availability_by_date_and_time] Invalid time format: {time}")
-        return f"Invalid time format: '{time}'. Please provide time in HH:MM:SS format (e.g., 14:30:00)."
-
-    calendars = _get_scheduling_calendars(request["tenant_name"])
-    if not calendars:
-        logger.info("[st_check_availability_by_date_and_time] No calendar for checking availability")
+    calendar_accounts = _resolve_scheduling_calendars(request["tenant_name"])
+    if not calendar_accounts:
+        logger.info("[st_check_slot_availability] No calendar for checking availability")
         return "We can't can't check availability because the calendar doesn't exist"
 
     # Available if at least ONE calendar has the slot free — that calendar will receive the event
-    for cal in calendars:
-        service = get_calendar_service(cal.access_token, cal.refresh_token)
-        calendar_timezone = service.calendarList().get(calendarId=cal.email).execute().get("timeZone")
-
-        tz = pytz.timezone(calendar_timezone)
-        datetime_obj = tz.localize(datetime.strptime(date + "T" + time, GOOGLE_DATETIME_FORMAT))
-        end_datetime_obj = datetime_obj + timedelta(minutes=duration_minutes)
-
-        if (
-            cal.opening_hours
-            and len(cal.opening_hours) > 0
-            and (
-                not is_within_opening_hours(datetime_obj, cal.opening_hours)
-                or not is_within_opening_hours(end_datetime_obj, cal.opening_hours)
-            )
+    for calendar_account in calendar_accounts:
+        if slot_reply := _check_calendar_slot_for_customer(
+            calendar_account, request["sender_id"], date, time, duration_minutes
         ):
-            logger.info(f"[st_check_availability_by_date_and_time] {cal.email}: closed at this time")
-            continue
+            return slot_reply
 
-        if is_time_slot_available(
-            service=service,
-            calendar_id=cal.email,
-            start_time=datetime_obj.isoformat(),
-            end_time=end_datetime_obj.isoformat(),
-            timezone=calendar_timezone,
-            ignore_long_events=getattr(cal, "ignore_long_events", False),
-        ):
-            logger.info(f"[st_check_availability_by_date_and_time] {cal.email}: AVAILABLE")
-            return "This time slot is available"
-        _, own_event = _find_customer_event_at([cal], request["sender_id"], datetime_obj)
-        if own_event:
-            logger.info(f"[st_check_availability_by_date_and_time] {cal.email}: taken by the customer's own {own_event['id']}")
-            return (
-                f"This time is already booked for this customer: their own appointment '{own_event.get('summary')}' "
-                f"(event_id {own_event['id']}). It is confirmed; do not book it again."
-            )
-        logger.info(f"[st_check_availability_by_date_and_time] {cal.email}: busy")
-
-    logger.info("[st_check_availability_by_date_and_time] No calendar available for this slot")
+    logger.info("[st_check_slot_availability] No calendar available for this slot")
     return "This time slot is not available"
 
 
 # --------------------------------------------------------
 
 
-@gpt_tool
-async def st_get_available_times_by_range(
+def _validate_date_range_format(range_start_date: str, range_end_date: str) -> str | None:
+    """Text for the model when date_from or date_to is not YYYY-MM-DD; None when both are well-formed."""
+    # Validate date format - must be YYYY-MM-DD
+    date_format_pattern = r"^\d{4}-\d{2}-\d{2}$"
+    if not range_start_date or not re.match(date_format_pattern, str(range_start_date)):
+        logger.error(f"[ERROR st_list_free_slots_in_range] Invalid date_from format: {range_start_date}")
+        return f"Invalid date format for date_from: '{range_start_date}'. Please provide dates in YYYY-MM-DD format (e.g., 2026-01-20)."
+    if not range_end_date or not re.match(date_format_pattern, str(range_end_date)):
+        logger.error(f"[ERROR st_list_free_slots_in_range] Invalid date_to format: {range_end_date}")
+        return f"Invalid date format for date_to: '{range_end_date}'. Please provide dates in YYYY-MM-DD format (e.g., 2026-01-20)."
+    return None
+
+
+def _collect_rendered_free_slots(
+    calendar_accounts, range_start_date, range_start_time, range_end_date, range_end_time, tool_name: str
+) -> list[dict]:
+    """Free slots of all the calendars in the range, rendered as {date, start, end} for the model.
+
+    Shared by st_list_free_slots_in_range and st_list_upcoming_free_slots: its three log lines carry the calling
+    tool's name (`tool_name`) as their `[...]` prefix.
+    """
+    free_slots = _merge_free_slots_across_calendars(calendar_accounts, range_start_date, range_start_time, range_end_date, range_end_time)
+
+    logger.info(f"[{tool_name}] union returned {len(free_slots)} slots")
+
+    rendered_slots = _render_slots_for_model(free_slots)
+
+    logger.info(f"[{tool_name}] After simplify: {len(rendered_slots)} slots")
+    logger.info(f"[{tool_name}] First 20 slots: {rendered_slots[:20]}")
+    return rendered_slots
+
+
+@llm_tool
+async def st_list_free_slots_in_range(
     request: MessageContext,
     date_from: str,
     date_to: str,
@@ -605,118 +738,111 @@ async def st_get_available_times_by_range(
     time_from: The start time of the start date from which to check availability, in HH:MM:SS format
     time_to: The end time of the end date until which to check availability, in HH:MM:SS format
     """
-    logger.info(f"[DEBUG st_get_available_times_by_range] Received arguments: date_from={date_from}, date_to={date_to}, time_from={time_from}, time_to={time_to}")
+    logger.info(f"[DEBUG st_list_free_slots_in_range] Received arguments: date_from={date_from}, date_to={date_to}, time_from={time_from}, time_to={time_to}")
 
-    # Validate date format - must be YYYY-MM-DD
-    date_pattern = r"^\d{4}-\d{2}-\d{2}$"
-    if not date_from or not re.match(date_pattern, str(date_from)):
-        logger.error(f"[ERROR st_get_available_times_by_range] Invalid date_from format: {date_from}")
-        return f"Invalid date format for date_from: '{date_from}'. Please provide dates in YYYY-MM-DD format (e.g., 2026-01-20)."
-    if not date_to or not re.match(date_pattern, str(date_to)):
-        logger.error(f"[ERROR st_get_available_times_by_range] Invalid date_to format: {date_to}")
-        return f"Invalid date format for date_to: '{date_to}'. Please provide dates in YYYY-MM-DD format (e.g., 2026-01-20)."
+    if format_error_reply := _validate_date_range_format(date_from, date_to):
+        return format_error_reply
 
     if not time_from:
         time_from = "00:00:00"
     if not time_to:
         time_to = "23:59:59"
 
-    calendars = _get_scheduling_calendars(request["tenant_name"])
-    if not calendars:
-        logger.info("[st_get_available_times_by_range] No calendar for checking availability")
+    calendar_accounts = _resolve_scheduling_calendars(request["tenant_name"])
+    if not calendar_accounts:
+        logger.info("[st_list_free_slots_in_range] No calendar for checking availability")
         return "We can't can't check availability because the calendar doesn't exist"
 
-    logger.info(f"[st_get_available_times_by_range] {len(calendars)} calendar(s): {[c.email for c in calendars]}")
+    logger.info(f"[st_list_free_slots_in_range] {len(calendar_accounts)} calendar(s): {[calendar_account.email for calendar_account in calendar_accounts]}")
 
-    filtered_available_slots = _get_availability_union(calendars, date_from, time_from, date_to, time_to)
+    rendered_slots = _collect_rendered_free_slots(
+        calendar_accounts, date_from, time_from, date_to, time_to, "st_list_free_slots_in_range"
+    )
 
-    logger.info(f"[st_get_available_times_by_range] union returned {len(filtered_available_slots)} slots")
-
-    filtered_available_slots = _simplify_slot_structure(filtered_available_slots)
-
-    logger.info(f"[st_get_available_times_by_range] After simplify: {len(filtered_available_slots)} slots")
-    logger.info(f"[st_get_available_times_by_range] First 20 slots: {filtered_available_slots[:20]}")
-
-    if len(filtered_available_slots) > 0:
-        logger.info(f"[st_get_available_times_by_range] Returning {len(filtered_available_slots)} available times")
-        return "Available times: " + str(filtered_available_slots)
-    if len(filtered_available_slots) == 0:
-        logger.info("[st_get_available_times_by_range] No available times.")
+    if len(rendered_slots) > 0:
+        logger.info(f"[st_list_free_slots_in_range] Returning {len(rendered_slots)} available times")
+        return "Available times: " + str(rendered_slots)
+    if len(rendered_slots) == 0:
+        logger.info("[st_list_free_slots_in_range] No available times.")
         return "No available times."
 
 
 # --------------------------------------------------------
 
 
-@gpt_tool
-async def st_get_available_event_times(request: MessageContext) -> str:
-    """
-    Get available times from the calendar for events when no dates/times/indicators are provided by the user.
-    """
-    logger.info(f"\n{'#' * 60}")
-    logger.info("[st_get_available_event_times] CALLED")
-    logger.info(f"[st_get_available_event_times] tenant_name: {request['tenant_name']}")
-
-    calendars = _get_scheduling_calendars(request["tenant_name"])
-    if not calendars:
-        logger.info("[st_get_available_event_times] No calendar for checking availability")
-        return "We can't can't check availability because the calendar doesn't exist"
-
-    logger.info(f"[st_get_available_event_times] {len(calendars)} calendar(s): {[c.email for c in calendars]}")
-
+def _resolve_upcoming_week_dates(calendar_accounts) -> tuple[str, str]:
+    """Tomorrow and tomorrow + 6 days as YYYY-MM-DD, "today" taken in the first calendar's timezone."""
     # Use the first calendar's timezone to compute "today" — calendars usually share a tz
-    ref_cal = calendars[0]
-    ref_service = get_calendar_service(ref_cal.access_token, ref_cal.refresh_token)
-    calendar_timezone = ref_service.calendarList().get(calendarId=ref_cal.email).execute().get("timeZone")
-    logger.info(f"[st_get_available_event_times] reference timezone (from {ref_cal.email}): {calendar_timezone}")
+    reference_calendar_account = calendar_accounts[0]
+    reference_calendar_client = build_calendar_client(reference_calendar_account.access_token, reference_calendar_account.refresh_token)
+    calendar_timezone_name = reference_calendar_client.calendarList().get(calendarId=reference_calendar_account.email).execute().get("timeZone")
+    logger.info(f"[st_list_upcoming_free_slots] reference timezone (from {reference_calendar_account.email}): {calendar_timezone_name}")
 
-    tz = pytz.timezone(calendar_timezone)
-    today = datetime.now(tz).date()
-    logger.info(f"[st_get_available_event_times] today (in calendar timezone): {today}")
+    calendar_timezone = pytz.timezone(calendar_timezone_name)
+    today = datetime.now(calendar_timezone).date()
+    logger.info(f"[st_list_upcoming_free_slots] today (in calendar timezone): {today}")
 
-    date_from = today + timedelta(days=1)
-    date_to = date_from + timedelta(days=6)  # 6 more days after tomorrow
+    tomorrow = today + timedelta(days=1)
+    range_last_day = tomorrow + timedelta(days=6)  # 6 more days after tomorrow
 
-    date_from = date_from.strftime("%Y-%m-%d")
-    date_to = date_to.strftime("%Y-%m-%d")
-    time_from = "00:00:00"
-    time_to = "23:59:59"
+    return tomorrow.strftime("%Y-%m-%d"), range_last_day.strftime("%Y-%m-%d")
 
-    logger.info("[st_get_available_event_times] Calling _get_availability_union with:")
-    logger.info(f"[st_get_available_event_times]   date_from: {date_from}")
-    logger.info(f"[st_get_available_event_times]   date_to: {date_to}")
 
-    filtered_available_slots = _get_availability_union(calendars, date_from, time_from, date_to, time_to)
-
-    logger.info(f"[st_get_available_event_times] union returned {len(filtered_available_slots)} slots")
-
-    filtered_available_slots = _simplify_slot_structure(filtered_available_slots)
-
-    logger.info(f"[st_get_available_event_times] After simplify: {len(filtered_available_slots)} slots")
-    logger.info(f"[st_get_available_event_times] First 20 slots: {filtered_available_slots[:20]}")
-
-    if len(filtered_available_slots) == 0:
-        logger.info("[st_get_available_event_times] No available times.")
+def _compose_free_slots_reply(message_context: MessageContext, rendered_slots: list[dict]) -> str:
+    """Text for the model: no slot, 2-3 suggestions from different days on a phone call, or the full list."""
+    if len(rendered_slots) == 0:
+        logger.info("[st_list_upcoming_free_slots] No available times.")
         logger.info(f"{'#' * 60}\n")
         return "No available times."
 
     # For phone calls, return only 2-3 suggestions from different days
-    if request.get("platform") == "telephone":
-        filtered_available_slots = _pick_suggested_slots(filtered_available_slots)
-        logger.info(f"[st_get_available_event_times] Telephone mode - returning {len(filtered_available_slots)} suggestions")
+    if message_context.get("platform") == "telephone":
+        suggested_slots = _sample_slots_from_distinct_days(rendered_slots)
+        logger.info(f"[st_list_upcoming_free_slots] Telephone mode - returning {len(suggested_slots)} suggestions")
         logger.info(f"{'#' * 60}\n")
-        return "Suggested available times: " + str(filtered_available_slots)
+        return "Suggested available times: " + str(suggested_slots)
 
-    logger.info(f"[st_get_available_event_times] Returning {len(filtered_available_slots)} available times")
+    logger.info(f"[st_list_upcoming_free_slots] Returning {len(rendered_slots)} available times")
     logger.info(f"{'#' * 60}\n")
-    return "Available times: " + str(filtered_available_slots)
+    return "Available times: " + str(rendered_slots)
+
+
+@llm_tool
+async def st_list_upcoming_free_slots(request: MessageContext) -> str:
+    """
+    Get available times from the calendar for events when no dates/times/indicators are provided by the user.
+    """
+    logger.info(f"\n{'#' * 60}")
+    logger.info("[st_list_upcoming_free_slots] CALLED")
+    logger.info(f"[st_list_upcoming_free_slots] tenant_name: {request['tenant_name']}")
+
+    calendar_accounts = _resolve_scheduling_calendars(request["tenant_name"])
+    if not calendar_accounts:
+        logger.info("[st_list_upcoming_free_slots] No calendar for checking availability")
+        return "We can't can't check availability because the calendar doesn't exist"
+
+    logger.info(f"[st_list_upcoming_free_slots] {len(calendar_accounts)} calendar(s): {[calendar_account.email for calendar_account in calendar_accounts]}")
+
+    range_start_date, range_end_date = _resolve_upcoming_week_dates(calendar_accounts)
+    range_start_time = "00:00:00"
+    range_end_time = "23:59:59"
+
+    logger.info("[st_list_upcoming_free_slots] Calling _get_availability_union with:")
+    logger.info(f"[st_list_upcoming_free_slots]   date_from: {range_start_date}")
+    logger.info(f"[st_list_upcoming_free_slots]   date_to: {range_end_date}")
+
+    rendered_slots = _collect_rendered_free_slots(
+        calendar_accounts, range_start_date, range_start_time, range_end_date, range_end_time, "st_list_upcoming_free_slots"
+    )
+
+    return _compose_free_slots_reply(request, rendered_slots)
 
 
 # --------------------------------------------------------
 
 
-@gpt_tool
-async def st_reschedule_event(
+@llm_tool
+async def st_reschedule_appointment(
     request: MessageContext, new_date: str, new_time: str, event_id: Optional[str] = None, duration_minutes: int = 30
 ) -> str:
     """
@@ -730,34 +856,36 @@ async def st_reschedule_event(
     if not event_id:
         return "Missing event ID for rescheduling. Get the events of the user and let him choose which one he wants to reschedule."
 
-    calendars = _get_scheduling_calendars(request["tenant_name"])
-    if not calendars:
-        logger.info("[st_reschedule_event] No calendar for rescheduling")
+    calendar_accounts = _resolve_scheduling_calendars(request["tenant_name"])
+    if not calendar_accounts:
+        logger.info("[st_reschedule_appointment] No calendar for rescheduling")
         return "We can't reschedule the event because the calendar doesn't exist."
 
-    target_cal, target_service, event = _find_calendar_event(calendars, event_id)
-    if not target_cal or not event:
-        logger.warning(f"[st_reschedule_event] Event {event_id} not found in any calendar")
+    target_calendar_account, target_calendar_client, calendar_event = _find_event_across_calendars(
+        calendar_accounts, event_id
+    )
+    if not target_calendar_account or not calendar_event:
+        logger.warning(f"[st_reschedule_appointment] Event {event_id} not found in any calendar")
         return "Event not found. Get the events of the user and let him choose which one he wants to reschedule."
 
-    calendar_timezone, datetime_obj, end_datetime_obj = _build_reschedule_window(
-        target_service, target_cal, new_date, new_time, duration_minutes
+    calendar_timezone_name, slot_start, slot_end = _localize_rescheduled_slot(
+        target_calendar_client, target_calendar_account, new_date, new_time, duration_minutes
     )
-    if unavailable_message := _validate_reschedule_slot(
-        target_service, target_cal, calendar_timezone, datetime_obj, end_datetime_obj
+    if slot_conflict_reply := _find_rescheduled_slot_conflict(
+        target_calendar_client, target_calendar_account, calendar_timezone_name, slot_start, slot_end
     ):
-        return unavailable_message
+        return slot_conflict_reply
 
     try:
-        updated_event = _apply_calendar_reschedule(
-            target_service, target_cal, event_id, event, calendar_timezone, datetime_obj, end_datetime_obj
+        updated_event = _move_event_to_slot(
+            target_calendar_client, target_calendar_account, event_id, calendar_event, calendar_timezone_name, slot_start, slot_end
         )
-        _update_customer_rescheduled_meeting(request["customer"], event_id, datetime_obj, end_datetime_obj)
+        _record_meeting_new_times(request["customer"], event_id, slot_start, slot_end)
         logger.info(" ".join(str(part) for part in ("Event rescheduled:", updated_event)))
         return f"Ok, I have rescheduled your event to {new_date} at {new_time}."
 
-    except Exception as e:
-        logger.error(" ".join(str(part) for part in ("Error during rescheduling:", str(e))))
+    except Exception as error:
+        logger.error(" ".join(str(part) for part in ("Error during rescheduling:", str(error))))
         return "Something went wrong while trying to reschedule the event."
 
 
@@ -766,15 +894,31 @@ async def st_reschedule_event(
 # --------------------------------------------------------
 
 
-def _pick_suggested_slots(simplified_slots):
-    """Pick 2-3 suggested slots from different days (for phone calls)"""
-    # Group by day
+def _group_slots_by_day(rendered_slots):
+    """The rendered slots grouped by their 'date' string, each day keeping the slots in their order."""
     slots_by_day = {}
-    for slot in simplified_slots:
+    for slot in rendered_slots:
         day = slot["date"]
         if day not in slots_by_day:
             slots_by_day[day] = []
         slots_by_day[day].append(slot)
+    return slots_by_day
+
+
+def _pick_mid_day_slot(day_slots):
+    """One slot of the day: a random one from the middle third when the day has 3 or more, otherwise the first."""
+    slot_count = len(day_slots)
+    if slot_count >= 3:
+        middle_third_start = slot_count // 3
+        middle_third_end = 2 * slot_count // 3
+        return random.choice(day_slots[middle_third_start:middle_third_end])
+    return day_slots[0]
+
+
+def _sample_slots_from_distinct_days(rendered_slots):
+    """Pick 2-3 suggested slots from different days (for phone calls)"""
+    # Group by day
+    slots_by_day = _group_slots_by_day(rendered_slots)
 
     # Pick up to 3 different days
     available_days = sorted(slots_by_day.keys())
@@ -782,99 +926,107 @@ def _pick_suggested_slots(simplified_slots):
     selected_days.sort()
 
     # From each day, pick a mid-range slot (not the earliest/latest)
-    suggestions = []
+    suggested_slots = []
     for day in selected_days:
-        day_slots = slots_by_day[day]
-        n = len(day_slots)
-        if n >= 3:
-            mid_start = n // 3
-            mid_end = 2 * n // 3
-            slot = random.choice(day_slots[mid_start:mid_end])
-        else:
-            slot = day_slots[0]
-        suggestions.append(slot)
+        suggested_slots.append(_pick_mid_day_slot(slots_by_day[day]))
 
-    return suggestions
+    return suggested_slots
 
 
-def _get_availability(calendar, date_from, time_from, date_to, time_to):
-    """Get available times for range of dates and times for a single calendar."""
-    logger.info(f"\n{'=' * 60}")
-    logger.info("[_get_availability] CALLED")
-    logger.info(f"[_get_availability] calendar.email: {calendar.email}")
-    logger.info(f"[_get_availability] calendar.ignore_long_events: {getattr(calendar, 'ignore_long_events', 'NOT SET')}")
-    logger.info(f"[_get_availability] date_from: {date_from}")
-    logger.info(f"[_get_availability] time_from: {time_from}")
-    logger.info(f"[_get_availability] date_to: {date_to}")
-    logger.info(f"[_get_availability] time_to: {time_to}")
-
-    service = get_calendar_service(calendar.access_token, calendar.refresh_token)
-
+def _localize_search_range(
+    calendar_client, calendar_account, range_start_date, range_start_time, range_end_date, range_end_time
+):
+    """Localize both bounds of the range in the calendar's timezone; returns (timezone, range start, range end)."""
     # get the calendar's timezone
-    calendar_timezone = service.calendarList().get(calendarId=calendar.email).execute().get("timeZone")
+    calendar_timezone_name = calendar_client.calendarList().get(calendarId=calendar_account.email).execute().get("timeZone")
 
-    logger.info(f"[_get_availability] calendar_timezone from API: {calendar_timezone}")
+    logger.info(f"[_get_availability] calendar_timezone from API: {calendar_timezone_name}")
 
     # create end datetime
-    date_from_str = date_from + "T" + time_from
-    date_from_obj = datetime.strptime(date_from_str, GOOGLE_DATETIME_FORMAT)
-    date_to_str = date_to + "T" + time_to
-    date_to_obj = datetime.strptime(date_to_str, GOOGLE_DATETIME_FORMAT)
+    range_start_text = range_start_date + "T" + range_start_time
+    naive_range_start = datetime.strptime(range_start_text, NAIVE_DATETIME_FORMAT)
+    range_end_text = range_end_date + "T" + range_end_time
+    naive_range_end = datetime.strptime(range_end_text, NAIVE_DATETIME_FORMAT)
 
-    logger.info(f"[_get_availability] date_from_str: {date_from_str}")
-    logger.info(f"[_get_availability] date_to_str: {date_to_str}")
+    logger.info(f"[_get_availability] date_from_str: {range_start_text}")
+    logger.info(f"[_get_availability] date_to_str: {range_end_text}")
 
     # FIX: Use localize() instead of astimezone() for naive datetimes
     # astimezone() assumes the naive datetime is in system local timezone, which is wrong
     # We want to treat the datetime as being in the calendar's timezone
-    tz = pytz.timezone(calendar_timezone)
-    date_from_obj = tz.localize(date_from_obj)
-    date_to_obj = tz.localize(date_to_obj)
+    calendar_timezone = pytz.timezone(calendar_timezone_name)
+    range_start = calendar_timezone.localize(naive_range_start)
+    range_end = calendar_timezone.localize(naive_range_end)
 
-    logger.info(f"[_get_availability] date_from_obj (localized): {date_from_obj}")
-    logger.info(f"[_get_availability] date_to_obj (localized): {date_to_obj}")
+    logger.info(f"[_get_availability] date_from_obj (localized): {range_start}")
+    logger.info(f"[_get_availability] date_to_obj (localized): {range_end}")
+    return calendar_timezone_name, range_start, range_end
+
+
+def _keep_slots_within_opening_hours(available_slots, calendar_account, calendar_timezone_name):
+    """The free slots converted to the calendar's timezone, kept only when start and end are inside the opening hours."""
+    slots_within_hours = []
+    for slot_start, slot_end in available_slots:
+        # Convert the start and end datetime to the correct timezone
+        slot_start = slot_start.astimezone(pytz.timezone(calendar_timezone_name))
+        slot_end = slot_end.astimezone(pytz.timezone(calendar_timezone_name))
+
+        # Check if the slot is within the opening hours
+        if calendar_account.opening_hours and len(calendar_account.opening_hours) > 0:
+            # Check if the start and end datetime are within the opening hours
+            is_start_within_hours = is_datetime_within_opening_hours(slot_start, calendar_account.opening_hours)
+            is_end_within_hours = is_datetime_within_opening_hours(slot_end, calendar_account.opening_hours)
+
+            # If either start or end time is outside the opening hours, skip this slot
+            if not is_start_within_hours or not is_end_within_hours:
+                continue
+
+            if is_start_within_hours and is_end_within_hours:
+                # If the slot is within the opening hours, append it to the result list
+                slots_within_hours.append((slot_start, slot_end))
+    return slots_within_hours
+
+
+def _list_free_slots_in_calendar(calendar_account, range_start_date, range_start_time, range_end_date, range_end_time):
+    """Get available times for range of dates and times for a single calendar."""
+    logger.info(f"\n{'=' * 60}")
+    logger.info("[_get_availability] CALLED")
+    logger.info(f"[_get_availability] calendar.email: {calendar_account.email}")
+    logger.info(f"[_get_availability] calendar.ignore_long_events: {getattr(calendar_account, 'ignore_long_events', 'NOT SET')}")
+    logger.info(f"[_get_availability] date_from: {range_start_date}")
+    logger.info(f"[_get_availability] time_from: {range_start_time}")
+    logger.info(f"[_get_availability] date_to: {range_end_date}")
+    logger.info(f"[_get_availability] time_to: {range_end_time}")
+
+    calendar_client = build_calendar_client(calendar_account.access_token, calendar_account.refresh_token)
+
+    calendar_timezone_name, range_start, range_end = _localize_search_range(
+        calendar_client, calendar_account, range_start_date, range_start_time, range_end_date, range_end_time
+    )
 
     logger.info("[_get_availability] Calling get_available_time_slots_in_range...")
 
     # Get available time slots in range of dates
-    available_slots = get_available_time_slots_in_range(
-        service=service,
-        calendar_id=calendar.email,
-        start_date=date_from_obj.isoformat(),
-        end_date=date_to_obj.isoformat(),
-        timezone=calendar_timezone,
-        ignore_long_events=getattr(calendar, "ignore_long_events", False),
+    available_slots = find_free_slots_in_range(
+        calendar_client=calendar_client,
+        google_calendar_id=calendar_account.email,
+        range_start_iso=range_start.isoformat(),
+        range_end_iso=range_end.isoformat(),
+        timezone_name=calendar_timezone_name,
+        should_ignore_long_events=getattr(calendar_account, "ignore_long_events", False),
     )
 
     logger.info(f"[_get_availability] get_available_time_slots_in_range returned {len(available_slots)} slots")
 
-    filtered_available_slots = []
-    for start_datetime, end_datetime in available_slots:
-        # Convert the start and end datetime to the correct timezone
-        start_datetime = start_datetime.astimezone(pytz.timezone(calendar_timezone))
-        end_datetime = end_datetime.astimezone(pytz.timezone(calendar_timezone))
+    slots_within_hours = _keep_slots_within_opening_hours(available_slots, calendar_account, calendar_timezone_name)
 
-        # Check if the slot is within the opening hours
-        if calendar.opening_hours and len(calendar.opening_hours) > 0:
-            # Check if the start and end datetime are within the opening hours
-            is_open = is_within_opening_hours(start_datetime, calendar.opening_hours)
-            end_is_open = is_within_opening_hours(end_datetime, calendar.opening_hours)
-
-            # If either start or end time is outside the opening hours, skip this slot
-            if not is_open or not end_is_open:
-                continue
-
-            if is_open and end_is_open:
-                # If the slot is within the opening hours, append it to the result list
-                filtered_available_slots.append((start_datetime, end_datetime))
-
-    logger.info(f"[_get_availability] After opening hours filter: {len(filtered_available_slots)} slots")
+    logger.info(f"[_get_availability] After opening hours filter: {len(slots_within_hours)} slots")
     logger.info(f"{'=' * 60}\n")
 
-    return filtered_available_slots
+    return slots_within_hours
 
 
-def _get_availability_union(calendars, date_from, time_from, date_to, time_to):
+def _merge_free_slots_across_calendars(calendar_accounts, range_start_date, range_start_time, range_end_date, range_end_time):
     """Union of available slots across multiple calendars.
 
     A slot is included if at least one calendar has it free. This matches the
@@ -884,23 +1036,25 @@ def _get_availability_union(calendars, date_from, time_from, date_to, time_to):
     Slots are deduplicated by their UTC instant so calendars in different
     timezones still merge correctly. The result is sorted by start time.
     """
-    seen = set()
-    union = []
-    for cal in calendars:
-        slots = _get_availability(cal, date_from, time_from, date_to, time_to)
-        for start, end in slots:
-            key = (start.astimezone(pytz.UTC).isoformat(), end.astimezone(pytz.UTC).isoformat())
-            if key in seen:
+    seen_slot_keys = set()
+    merged_slots = []
+    for calendar_account in calendar_accounts:
+        calendar_free_slots = _list_free_slots_in_calendar(
+            calendar_account, range_start_date, range_start_time, range_end_date, range_end_time
+        )
+        for slot_start, slot_end in calendar_free_slots:
+            slot_key = (slot_start.astimezone(pytz.UTC).isoformat(), slot_end.astimezone(pytz.UTC).isoformat())
+            if slot_key in seen_slot_keys:
                 continue
-            seen.add(key)
-            union.append((start, end))
-    union.sort(key=lambda pair: pair[0])
-    return union
+            seen_slot_keys.add(slot_key)
+            merged_slots.append((slot_start, slot_end))
+    merged_slots.sort(key=lambda slot_window: slot_window[0])
+    return merged_slots
 
 
-def _simplify_slot_structure(slot_list):
+def _render_slots_for_model(slot_windows):
     """(start, end) datetimes to {date, start, end} strings the model can read."""
     return [
-        {"date": start.strftime("%d-%m-%Y"), "start": start.strftime("%H:%M"), "end": end.strftime("%H:%M")}
-        for start, end in slot_list
+        {"date": slot_start.strftime("%d-%m-%Y"), "start": slot_start.strftime("%H:%M"), "end": slot_end.strftime("%H:%M")}
+        for slot_start, slot_end in slot_windows
     ]

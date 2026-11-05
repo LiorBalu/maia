@@ -1,4 +1,4 @@
-"""AgentDocument: per-tenant LLM configuration (provider, model, temperature, top-k) read by the RAG chain as `agent_config`."""
+"""AgentDocument: per-tenant LLM configuration (provider, model, temperature, top-k) read by the RAG chain as `agent_config_for_rag`."""
 
 from datetime import datetime
 
@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 
 class AgentDocument(Document):
-    """LLM configuration of a tenant: provider, model, temperature, retrieval top-k and thresholds. Only one agent is
+    """LLM configuration of a tenant: provider, model, temperature, retrieval top-k and score threshold. Only one agent is
     active per tenant.
     """
     name = StringField(required=True)
@@ -20,10 +20,15 @@ class AgentDocument(Document):
     score_threshold = FloatField(default=0.5)
     top_k_general = IntField(default=10)
     top_k_qa = IntField(default=5)
-    direct_answer_threshold = FloatField(default=0)
     created_at = DateTimeField()
     updated_at = DateTimeField()
     meta = {"collection": "agents"}
+
+    def _deactivate_other_agents_of_tenant(self):
+        """Deactivate other agents in the same tenant."""
+        AgentDocument.objects(tenant_name=self.tenant_name, is_active=True, id__ne=self.id).update(
+            set__is_active=False
+        )
 
     def save(self, *args, **kwargs):
         """Stamp created_at / updated_at; an active agent deactivates the tenant's other agents."""
@@ -31,15 +36,12 @@ class AgentDocument(Document):
             self.created_at = datetime.utcnow()
         self.updated_at = datetime.utcnow()
         if self.is_active:
-            # Deactivate other agents in the same tenant
-            AgentDocument.objects(tenant_name=self.tenant_name, is_active=True, id__ne=self.id).update(
-                set__is_active=False
-            )
+            self._deactivate_other_agents_of_tenant()
         return super().save(*args, **kwargs)
 
     @property
-    def agent_config(self):
-        """The dict the RAG chain reads (model, provider, temperature, thresholds, top-k)."""
+    def agent_config_for_rag(self):
+        """The dict the RAG chain reads (model, provider, temperature, score threshold, top-k)."""
         return {
             "model": self.model,
             "provider": self.provider,
@@ -47,7 +49,6 @@ class AgentDocument(Document):
             "score_threshold": self.score_threshold,
             "top_k_general": self.top_k_general,
             "top_k_qa": self.top_k_qa,
-            "direct_answer_threshold": self.direct_answer_threshold,
         }
 
 
@@ -62,7 +63,6 @@ class AgentCreateRequest(BaseModel):
     score_threshold: float = 0.5
     top_k_general: int = 10
     top_k_qa: int = 5
-    direct_answer_threshold: float = 0
 
 
 class AgentResponse(BaseModel):
@@ -77,7 +77,6 @@ class AgentResponse(BaseModel):
     score_threshold: float
     top_k_general: int
     top_k_qa: int
-    direct_answer_threshold: float
     temperature: float
     created_at: int
     updated_at: int

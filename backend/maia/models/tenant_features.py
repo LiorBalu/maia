@@ -24,7 +24,7 @@ class FeatureTenant(EmbeddedDocument):
     meta_data = DictField(default={})
 
 
-tenant_default_features = [
+DEFAULT_TENANT_FEATURES = [
     FeatureTenant(name="default_platform", enabled=True, meta_data={"platform": "waha"}),
     FeatureTenant(name="call_auto_reset", enabled=True, meta_data={"on_start": True, "on_end": True}),
 ]

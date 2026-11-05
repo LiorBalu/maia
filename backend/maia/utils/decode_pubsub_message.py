@@ -4,13 +4,13 @@ import base64
 import json
 
 
-def decode_pubsub_message(pubsub_message):
+def extract_pubsub_push_payload(push_envelope):
     # Decode the Base64 payload
     """The JSON payload (emailAddress, historyId) of a Pub/Sub push envelope."""
-    decoded_data = base64.b64decode(pubsub_message["message"]["data"]).decode("utf-8")
+    payload_text = base64.b64decode(push_envelope["message"]["data"]).decode("utf-8")
     # Convert to JSON if that is the expected format
-    if isinstance(decoded_data, bytes):
-        decoded_data = decoded_data.decode("utf-8")
-    if isinstance(decoded_data, str):
-        return json.loads(decoded_data)
-    return json.loads(decoded_data)
+    if isinstance(payload_text, bytes):
+        payload_text = payload_text.decode("utf-8")
+    if isinstance(payload_text, str):
+        return json.loads(payload_text)
+    return json.loads(payload_text)

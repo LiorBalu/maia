@@ -9,7 +9,7 @@ export interface SheetPreview {
   row_count: number
 }
 
-/** The tenant's connected Google Sheet (read by the bot's st_search_sheet tool). */
+/** The tenant's connected Google Sheet (read by the bot's st_find_sheet_rows tool). */
 export interface SheetConnection {
   sheet_id: string | null
   sheet_url: string | null

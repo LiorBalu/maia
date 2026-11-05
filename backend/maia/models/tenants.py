@@ -17,7 +17,7 @@ from mongoengine import (
 )
 from pydantic import BaseModel
 
-from maia.models.tenant_features import FeatureTenant, FeatureTenantModel, tenant_default_features
+from maia.models.tenant_features import FeatureTenant, FeatureTenantModel, DEFAULT_TENANT_FEATURES
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +93,16 @@ class GoogleLLMSettings(EmbeddedDocument):
     model = StringField(required=False, default="google-model")
 
 
+def _fill_missing_meta_data(feature: FeatureTenant, default_meta_data: dict) -> bool:
+    """Copy into the feature's meta_data every default key it lacks; returns True when at least one key was added."""
+    has_added_key = False
+    for meta_key, default_value in default_meta_data.items():
+        if meta_key not in feature.meta_data:
+            feature.meta_data[meta_key] = default_value
+            has_added_key = True
+    return has_added_key
+
+
 class TenantDocument(Document):
     """A business using Maia: channels (Twilio Voice, WAHA), LLM provider settings, features, language, timezone,
     the connected Google Sheet and the tools the bot may call. Strict: a stored document may not carry unknown
@@ -112,12 +122,12 @@ class TenantDocument(Document):
     openai_settings = EmbeddedDocumentField(OpenAISettings, required=False, default=OpenAISettings())
     anthropic_settings = EmbeddedDocumentField(AnthropicSettings, required=False, default=AnthropicSettings())
     google_llm_settings = EmbeddedDocumentField(GoogleLLMSettings, required=False, default=GoogleLLMSettings())
-    features = ListField(EmbeddedDocumentField(FeatureTenant), default=tenant_default_features)
+    features = ListField(EmbeddedDocumentField(FeatureTenant), default=DEFAULT_TENANT_FEATURES)
     default_language = StringField(required=False, default="he")  # Default language for the tenant (he/en)
     default_timezone = StringField(required=False, default="Asia/Jerusalem")  # Default timezone
     owner_phone_number = StringField(required=False, default="")  # Owner phone number for notifications
-    google_sheet_id = StringField(required=False, default="")  # Spreadsheet the bot may read (st_search_sheet)
-    # Names of the `@gpt_tool` functions bound to the bot on every turn (chosen on the dashboard; applied by
+    google_sheet_id = StringField(required=False, default="")  # Spreadsheet the bot may read (st_find_sheet_rows)
+    # Names of the `@llm_tool` functions bound to the bot on every turn (chosen on the dashboard; applied by
     # `tenants/hooks.py`). Empty: the bot answers from the knowledge base only.
     tools = ListField(StringField(), default=[])
 
@@ -128,31 +138,38 @@ class TenantDocument(Document):
         ],
     }
 
-    def get_waha_by_phone_number(self, phone_number: str) -> Optional[WahaAccount]:
+    def find_waha_account_by_phone_number(self, tenant_phone_number: str) -> Optional[WahaAccount]:
         """Get WAHA account by phone number (primary identifier)"""
-        if not phone_number:
+        if not tenant_phone_number:
             return None
-        for account in self.waha_accounts:
-            if account.phone_number and account.phone_number.replace("+", "") == phone_number.replace("+", ""):
-                return account
+        for waha_account in self.waha_accounts:
+            if waha_account.phone_number and (
+                waha_account.phone_number.replace("+", "") == tenant_phone_number.replace("+", "")
+            ):
+                return waha_account
         return None
 
-    def get_feature_by_name(self, feature_name: str) -> FeatureTenantModel:
+    def _append_default_feature(self, feature_name: str, default_definition: dict) -> FeatureTenant:
+        """Append a FeatureTenant built from the default definition to the tenant's features (no save); returns it."""
+        added_feature = FeatureTenant(
+            name=feature_name, enabled=default_definition["enabled"], meta_data=default_definition["meta_data"]
+        )
+        self.features.append(added_feature)
+        return added_feature
+
+    def ensure_feature(self, feature_name: str) -> FeatureTenantModel:
         """
         Returns the feature with the given name if it exists in the tenant's features.
         """
-        feature = next((f for f in self.features if f.name == feature_name), None)
+        feature = next((candidate for candidate in self.features if candidate.name == feature_name), None)
         if not feature:
-            default_config = self.get_default_feature_config(feature_name)
-            feature = FeatureTenant(
-                name=feature_name, enabled=default_config["enabled"], meta_data=default_config["meta_data"]
-            )
-            self.features.append(feature)
+            default_definition = self.resolve_feature_defaults(feature_name)
+            feature = self._append_default_feature(feature_name, default_definition)
             self.save()
         return feature
 
     @classmethod
-    def get_default_feature_config(cls, feature_name: str) -> dict:
+    def resolve_feature_defaults(cls, feature_name: str) -> dict:
         """Default definition of a tenant feature: default_platform (waha) and call_auto_reset (both phases on);
         unknown names are disabled.
         """
@@ -162,48 +179,38 @@ class TenantDocument(Document):
             # Controls the automatic conversation reset around phone/SIP calls. `on_start` resets the
             # telephone conversation before placing/answering a call; `on_end` resets it once the call
             # completes. Both phases are enabled by default. The reset
-            # is platform-scoped (see reset_conversation) and platforms are always kept in separate
+            # is platform-scoped (see end_customer_conversation) and platforms are always kept in separate
             # conversations, so it only clears the telephone thread, never the WhatsApp/other-platform
             # conversation.
             return {"enabled": True, "meta_data": {"on_start": True, "on_end": True}}
         else:
             return {"enabled": False, "meta_data": {}}
 
-    def update_all_features(self):
+    def backfill_feature_defaults(self):
         """Backfill the known tenant features and their missing meta_data keys; returns True when something was saved.
         """
-        updated = False
-        all_default_features = ["default_platform", "call_auto_reset"]
+        has_changes = False
+        known_feature_names = ["default_platform", "call_auto_reset"]
 
-        existing_features = {feature.name: feature for feature in self.features}
+        stored_features_by_name = {feature.name: feature for feature in self.features}
 
-        for feature_name in all_default_features:
-            default_config = self.get_default_feature_config(feature_name)
+        for feature_name in known_feature_names:
+            default_definition = self.resolve_feature_defaults(feature_name)
 
-            if feature_name in existing_features:
-                existing_feature = existing_features[feature_name]
-                feature_updated = False
-
-                for key, value in default_config["meta_data"].items():
-                    if key not in existing_feature.meta_data:
-                        existing_feature.meta_data[key] = value
-                        feature_updated = True
-
-                if feature_updated:
-                    updated = True
+            if feature_name in stored_features_by_name:
+                stored_feature = stored_features_by_name[feature_name]
+                if _fill_missing_meta_data(stored_feature, default_definition["meta_data"]):
+                    has_changes = True
             else:
-                new_feature = FeatureTenant(
-                    name=feature_name, enabled=default_config["enabled"], meta_data=default_config["meta_data"]
-                )
-                self.features.append(new_feature)
-                updated = True
+                self._append_default_feature(feature_name, default_definition)
+                has_changes = True
 
-        if updated:
+        if has_changes:
             try:
                 self.save()
                 return True
-            except Exception as e:
-                logger.error(f"Error saving {self.name}: {str(e)}")
+            except Exception as error:
+                logger.error(f"Error saving {self.name}: {str(error)}")
                 return False
         else:
             return False
@@ -231,19 +238,21 @@ class TenantCustomer(BaseModel):
     tools: List[str] = []
 
 
-def call_auto_reset_enabled(tenant_name: str, phase: str) -> bool:
+def should_auto_reset_call_conversation(tenant_name: str, call_phase: str) -> bool:
     """True when the tenant should auto-reset the call conversation at the given phase.
 
-    `phase` is "on_start" (before placing/answering a call) or "on_end" (after a call completes).
+    `call_phase` is "on_start" (before placing/answering a call) or "on_end" (after a call completes).
     Reads the `call_auto_reset` feature directly (no side effects, safe on hot call paths) and
     defaults to enabled for both phases so tenants without the feature keep today's behaviour.
     """
-    tenant = TenantDocument.objects(name=tenant_name).only("features").first()
-    if not tenant:
+    tenant_doc = TenantDocument.objects(name=tenant_name).only("features").first()
+    if not tenant_doc:
         return True
-    feat = next((f for f in (tenant.features or []) if f.name == "call_auto_reset"), None)
-    if feat is None:
+    auto_reset_feature = next(
+        (feature for feature in (tenant_doc.features or []) if feature.name == "call_auto_reset"), None
+    )
+    if auto_reset_feature is None:
         return True
-    if not feat.enabled:
+    if not auto_reset_feature.enabled:
         return False
-    return bool((feat.meta_data or {}).get(phase, True))
+    return bool((auto_reset_feature.meta_data or {}).get(call_phase, True))

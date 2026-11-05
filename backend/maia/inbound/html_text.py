@@ -18,26 +18,40 @@ class HTMLTextExtractor(HTMLParser):
         """Collect a text node."""
         self.text_parts.append(data)
 
-    def get_text(self):
+    def join_text_parts(self):
         """The collected text, joined."""
         return "".join(self.text_parts)
 
 
-def html_to_text(html_content):
+def _feed_and_collect_text(text_extractor, raw_html):
+    """Feed the HTML to the extractor and return its text nodes joined, runs of whitespace collapsed to one space and
+    the ends stripped. Parser errors propagate: the caller falls back to the regex.
+    """
+    text_extractor.feed(raw_html)
+    plain_text = text_extractor.join_text_parts()
+    # Clean up extra whitespace and line breaks
+    plain_text = re.sub(r"\s+", " ", plain_text).strip()
+    return plain_text
+
+
+def _strip_html_tags_with_regex(raw_html):
+    """Fallback when the parser fails: remove every <...> tag with a regex and strip the ends (inner whitespace is
+    kept as it is).
+    """
+    html_tag_pattern = re.compile("<.*?>")
+    return re.sub(html_tag_pattern, "", raw_html).strip()
+
+
+def extract_text_from_html(raw_html):
     """Convert HTML content to plain text"""
-    if not html_content:
+    if not raw_html:
         return ""
 
-    # Create parser instance
-    parser = HTMLTextExtractor()
+    # Create text extractor instance
+    text_extractor = HTMLTextExtractor()
     try:
-        parser.feed(html_content)
-        text = parser.get_text()
-        # Clean up extra whitespace and line breaks
-        text = re.sub(r"\s+", " ", text).strip()
-        return text
-    except Exception as e:
-        logger.error(f"Error parsing HTML: {e}")
+        return _feed_and_collect_text(text_extractor, raw_html)
+    except Exception as error:
+        logger.error(f"Error parsing HTML: {error}")
         # Fallback: use regex to strip HTML tags
-        clean = re.compile("<.*?>")
-        return re.sub(clean, "", html_content).strip()
+        return _strip_html_tags_with_regex(raw_html)

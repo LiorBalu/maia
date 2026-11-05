@@ -7,22 +7,22 @@ for the repair lab, in-store consultation and order pickup in the store's Google
 
 from maia.pipeline.context import MessageContext
 
-CALENDAR_TOOLS = [
-    "st_get_available_event_times",
-    "st_get_available_times_by_range",
-    "st_check_availability_by_date_and_time",
-    "st_schedule_event",
-    "st_get_event_details",
-    "st_reschedule_event",
-    "st_cancel_event",
+CALENDAR_TOOL_NAMES = [
+    "st_list_upcoming_free_slots",
+    "st_list_free_slots_in_range",
+    "st_check_slot_availability",
+    "st_book_appointment",
+    "st_find_customer_appointments",
+    "st_reschedule_appointment",
+    "st_cancel_appointment",
 ]
 
 # Live price / stock lookup in the sheet connected on the dashboard (Settings > Google Sheets).
-SHEET_TOOLS = ["st_search_sheet"]
+SHEET_TOOL_NAMES = ["st_find_sheet_rows"]
 
 
-async def handle_lior_electric(request: MessageContext) -> None:
+async def prepare_context_for_lior_electric(message_context: MessageContext) -> None:
     """Expose the calendar and sheet tools on every turn (chat and phone)."""
-    for tool in CALENDAR_TOOLS + SHEET_TOOLS:
-        if tool not in request["tool_names"]:
-            request["tool_names"].append(tool)
+    for tool_name in CALENDAR_TOOL_NAMES + SHEET_TOOL_NAMES:
+        if tool_name not in message_context["tool_names"]:
+            message_context["tool_names"].append(tool_name)

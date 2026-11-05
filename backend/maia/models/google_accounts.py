@@ -22,7 +22,7 @@ class OpeningHours(EmbeddedDocument):
     closed = BooleanField(default=False)
 
 
-DAYS_OF_WEEK = [
+DEFAULT_OPENING_HOURS = [
     OpeningHours(day="sun", start_time="09:00", end_time="17:00", closed=False),
     OpeningHours(day="mon", start_time="09:00", end_time="17:00", closed=False),
     OpeningHours(day="tue", start_time="09:00", end_time="17:00", closed=False),
@@ -45,7 +45,7 @@ class GoogleShared(Document):
     refresh_token = StringField(required=False)
     expires_at = DateTimeField(required=False)
     default = BooleanField(default=False)
-    opening_hours = ListField(EmbeddedDocumentField(OpeningHours), default=DAYS_OF_WEEK)
+    opening_hours = ListField(EmbeddedDocumentField(OpeningHours), default=DEFAULT_OPENING_HOURS)
     # If True, ignore events longer than 12 hours (like all-day reminders)
     ignore_long_events = BooleanField(default=False)
     # List of authorized OAuth scopes for this calendar connection

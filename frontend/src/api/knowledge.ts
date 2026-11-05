@@ -13,7 +13,6 @@ export interface KnowledgeDocument {
   is_indexed: boolean
   created_at: string
   updated_at: string
-  categories?: string[]
 }
 
 export interface DocumentProgress {
@@ -86,7 +85,6 @@ export interface QAItem {
   tenant_name: string
   question: string
   answer: string
-  category: string
   is_indexed: boolean
   created_at: string
   updated_at: string
@@ -99,24 +97,16 @@ export interface QACount {
   pending_count: number
 }
 
-export interface QACategory {
-  category: string
-  total_count: number
-  indexed_count?: number
-  pending_count?: number
-}
-
 export interface QAInput {
   question: string
   answer: string
-  category?: string
 }
 
 export const QA_PAGE_SIZE = 50
 
-export async function listQA(tenant: string, page = 1, category?: string): Promise<QAItem[]> {
+export async function listQA(tenant: string, page = 1): Promise<QAItem[]> {
   const { data } = await api.get<QAItem[]>('/management/v1/qa/', {
-    params: { tenant_name: tenant, page, page_size: QA_PAGE_SIZE, category: category || undefined },
+    params: { tenant_name: tenant, page, page_size: QA_PAGE_SIZE },
   })
   return data
 }
@@ -126,15 +116,10 @@ export async function getQACount(tenant: string): Promise<QACount> {
   return data
 }
 
-export async function getQACategories(tenant: string): Promise<QACategory[]> {
-  const { data } = await api.get<QACategory[]>('/management/v1/qa/categories', { params: { tenant_name: tenant } })
-  return data
-}
-
 export async function createQA(tenant: string, input: QAInput): Promise<QAItem> {
   const { data } = await api.post<QAItem>(
     '/management/v1/qa/',
-    { ...input, category: input.category?.trim() || undefined, tenant_name: tenant },
+    { ...input, tenant_name: tenant },
     { params: { tenant_name: tenant } },
   )
   return data

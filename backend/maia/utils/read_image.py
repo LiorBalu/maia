@@ -6,9 +6,9 @@ import requests
 from PIL import Image
 
 
-def read_image(img_url):
+def extract_text_from_image(image_url):
     """Hebrew OCR (Tesseract) of an image URL."""
-    response = requests.get(img_url)
-    img = Image.open(BytesIO(response.content))
-    extracted_text = pytesseract.image_to_string(img, lang="heb") + "\n"
-    return extracted_text
+    image_response = requests.get(image_url)
+    decoded_image = Image.open(BytesIO(image_response.content))
+    recognized_text = pytesseract.image_to_string(decoded_image, lang="heb") + "\n"
+    return recognized_text

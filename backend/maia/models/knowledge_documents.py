@@ -14,6 +14,13 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 
+def _stamp_timestamps(record: Document) -> None:
+    """Set created_at when it is empty, then always refresh updated_at (naive UTC from datetime.utcnow())."""
+    if not record.created_at:
+        record.created_at = datetime.utcnow()
+    record.updated_at = datetime.utcnow()
+
+
 class EmbeddedPart(Document):
     """
     Independent document for storing document parts - avoids 16MB MongoDB limit.
@@ -42,14 +49,12 @@ class EmbeddedPart(Document):
 
     def save(self, *args, **kwargs):
         """Stamp created_at / updated_at."""
-        if not self.created_at:
-            self.created_at = datetime.utcnow()
-        self.updated_at = datetime.utcnow()
+        _stamp_timestamps(self)
         return super().save(*args, **kwargs)
 
 
 class EmbeddedDocument(Document):
-    """A knowledge document of a tenant (uploaded file or scraped site): title, source URL, categories, private flag
+    """A knowledge document of a tenant (uploaded file or scraped site): title, source URL, private flag
     and indexing state; its chunks are EmbeddedPart documents.
     """
     tenant_name = StringField(required=True)
@@ -60,7 +65,6 @@ class EmbeddedDocument(Document):
     # When True, this document is an automatically generated RAG memory for a specific WhatsApp group.
     # These docs should NOT be included in the default "document_ids=None => all docs" search.
     is_private = BooleanField(default=False)
-    categories = ListField(StringField())
     total_parts = IntField(default=0)  # Number of parts
     created_at = DateTimeField()
     updated_at = DateTimeField()
@@ -68,9 +72,7 @@ class EmbeddedDocument(Document):
 
     def save(self, *args, **kwargs):
         """Stamp created_at / updated_at."""
-        if not self.created_at:
-            self.created_at = datetime.utcnow()
-        self.updated_at = datetime.utcnow()
+        _stamp_timestamps(self)
         return super().save(*args, **kwargs)
 
 

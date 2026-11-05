@@ -171,7 +171,6 @@ function DocumentRow({ doc, tenant, onDelete, deleting }: { doc: KnowledgeDocume
           <div className="mt-0.5 flex flex-wrap gap-x-3 text-xs text-ink-soft">
             {created && <span>{formatDateTime(created)}</span>}
             <span>{t('knowledge.docs.parts', { count: doc.total_parts })}</span>
-            {doc.categories && doc.categories.length > 0 && <span>{doc.categories.join(', ')}</span>}
           </div>
           {!doc.is_indexed && !failed && (
             <div className="mt-2 h-1.5 w-full max-w-xs overflow-hidden rounded-full bg-brand-100">

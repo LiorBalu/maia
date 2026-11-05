@@ -5,13 +5,13 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from maia.models.users import User
-from maia.api.security import authenticate_user_token
+from maia.api.security import authenticate_current_user
 from maia.utils.CustomJSONResponse import CustomJSONResponse
 from maia.models.customers import CustomerDocument
 
 logger = logging.getLogger(__name__)
 
-customer_router = APIRouter(prefix="/customers", tags=["Customers/Clients"])
+customers_router = APIRouter(prefix="/customers", tags=["Customers/Clients"])
 
 
 class CustomerStatusUpdateRequest(BaseModel):
@@ -19,19 +19,19 @@ class CustomerStatusUpdateRequest(BaseModel):
     reply_mode: str
 
 
-@customer_router.put("/{tenant_name}/{phone_number}/reply_mode")
-async def update_customer_status(
-    reply_mode: CustomerStatusUpdateRequest,
+@customers_router.put("/{tenant_name}/{phone_number}/reply_mode")
+async def update_customer_reply_mode(
+    reply_mode_update: CustomerStatusUpdateRequest,
     tenant_name: str,
     phone_number: str,
-    user: User = Depends(authenticate_user_token),
+    current_user: User = Depends(authenticate_current_user),
 ):
     """Switch a customer between AI replies and manual handling; returns the stored customer."""
-    customer_doc = CustomerDocument.objects(phone_number=phone_number, tenant_name=tenant_name).first()
-    if not customer_doc:
+    customer_record = CustomerDocument.objects(phone_number=phone_number, tenant_name=tenant_name).first()
+    if not customer_record:
         return JSONResponse(status_code=404, content={"message": "Customer not found"})
 
-    customer_doc.reply_mode = reply_mode.reply_mode
-    customer_doc.save()
-    customer_doc.reload()
-    return CustomJSONResponse(content=customer_doc.to_mongo().to_dict())
+    customer_record.reply_mode = reply_mode_update.reply_mode
+    customer_record.save()
+    customer_record.reload()
+    return CustomJSONResponse(content=customer_record.to_mongo().to_dict())

@@ -7,29 +7,40 @@ from twilio.twiml.voice_response import Connect, VoiceResponse
 
 from maia.pipeline.context import TwimlReady, MessageContext
 from maia.models.settings import CallSettingsDocument
-from maia.utils.calls.call_routing import build_call_stream_url
+from maia.utils.calls.call_routing import build_media_stream_url
 
 logger = logging.getLogger(__name__)
 
 
-async def connect_call_to_stream(args: MessageContext):
+def _resolve_media_stream_url(message_context: MessageContext, tts_provider: str) -> str:
+    """The ``wss://`` media-stream URL of the inbound call, on the host of ``BACKEND_URL`` (read on every call)."""
+    backend_host = getenv("BACKEND_URL").replace("https://", "").replace("http://", "")
+    return build_media_stream_url(
+        backend_host, message_context["tenant_name"], message_context["sender_id"], message_context["recipient_id"], tts_provider, call_direction="inbound"
+    )
+
+
+def _render_connect_stream_twiml(media_stream_url: str) -> VoiceResponse:
+    """The TwiML ``<Response><Connect><Stream url=...>`` that connects the call to the media stream."""
+    twiml_response = VoiceResponse()
+    connect_verb = Connect()
+    connect_verb.stream(url=media_stream_url)
+    twiml_response.append(connect_verb)
+    return twiml_response
+
+
+async def connect_inbound_call_to_media_stream(message_context: MessageContext):
     """Answer an inbound Twilio Voice call by connecting it to the OpenAI Realtime media stream.
 
     Raises ``TwimlReady`` with the TwiML ``<Connect><Stream>``; returns ``None`` when the
     tenant has no call settings yet (the caller then ends the call silently).
     """
-    if args["platform"] != "telephone":
+    if message_context["platform"] != "telephone":
         return
-    call_settings = CallSettingsDocument.objects(tenant_name=args["tenant_name"]).first()
-    if not call_settings:
+    call_settings_doc = CallSettingsDocument.objects(tenant_name=message_context["tenant_name"]).first()
+    if not call_settings_doc:
         return
-    host = getenv("BACKEND_URL").replace("https://", "").replace("http://", "")
-    ws_url = build_call_stream_url(
-        host, args["tenant_name"], args["sender_id"], args["recipient_id"], call_settings.tts_provider, direction="inbound"
-    )
-    logger.info(f"Inbound {call_settings.tts_provider} stream URL: {ws_url}")
-    response = VoiceResponse()
-    connect = Connect()
-    connect.stream(url=ws_url)
-    response.append(connect)
-    raise TwimlReady(response)
+    media_stream_url = _resolve_media_stream_url(message_context, call_settings_doc.tts_provider)
+    logger.info(f"Inbound {call_settings_doc.tts_provider} stream URL: {media_stream_url}")
+    twiml_response = _render_connect_stream_twiml(media_stream_url)
+    raise TwimlReady(twiml_response)

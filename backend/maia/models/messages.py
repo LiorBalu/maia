@@ -12,9 +12,43 @@ from mongoengine import (
 )
 
 
-from maia.models.conversations import Conversation, online_conversation_filter
+from maia.models.conversations import Conversation, build_online_conversation_filter
 
 logger = logging.getLogger(__name__)
+
+
+def _serialize_api_value(value):
+    """Recursively serialize ObjectId values to strings"""
+    from bson import ObjectId
+
+    if isinstance(value, ObjectId):
+        return str(value)
+    elif isinstance(value, dict):
+        return {key: _serialize_api_value(nested_value) for key, nested_value in value.items()}
+    elif isinstance(value, datetime):
+        return value.isoformat()
+    elif isinstance(value, list):
+        return [_serialize_api_value(element) for element in value]
+    else:
+        return value
+
+
+def _collect_dated_messages(conversation):
+    """The messages referenced by the conversation that carry a date; a broken reference is logged and skipped."""
+    dated_messages = []
+    for message_index, referenced_message in enumerate(conversation.messages):
+        try:
+            # Try to access the date attribute - this will fail if the reference is broken
+            if (
+                referenced_message is not None
+                and hasattr(referenced_message, "date")
+                and referenced_message.date is not None
+            ):
+                dated_messages.append(referenced_message)
+        except Exception as reference_error:
+            logger.error(f"Warning: Skipping broken message reference at index {message_index} in conversation {conversation.id}: {type(reference_error).__name__}: {reference_error}")
+            continue
+    return dated_messages
 
 
 class MessageDocument(Document):
@@ -47,23 +81,10 @@ class MessageDocument(Document):
         ],
     }
 
-    def to_dict(self):
-        """Message as a dict for the API, with a display name per role."""
-        from bson import ObjectId
-
-        def serialize_value(value):
-            """Recursively serialize ObjectId values to strings"""
-            if isinstance(value, ObjectId):
-                return str(value)
-            elif isinstance(value, dict):
-                return {k: serialize_value(v) for k, v in value.items()}
-            elif isinstance(value, datetime):
-                return value.isoformat()
-            elif isinstance(value, list):
-                return [serialize_value(item) for item in value]
-            else:
-                return value
-
+    def _assign_display_name(self):
+        """Set profile_name in memory (nothing is saved): when empty, 'user' for a user message, 'agent' for a
+        manager message, 'AI' otherwise; always 'AI' for an assistant message.
+        """
         if not self.profile_name:
             if self.role == "user":
                 self.profile_name = "user"
@@ -73,6 +94,10 @@ class MessageDocument(Document):
                 self.profile_name = "AI"
         if self.role == "assistant":
             self.profile_name = "AI"
+
+    def serialize_for_api(self):
+        """Message as a dict for the API, with a display name per role."""
+        self._assign_display_name()
 
         return {
             "id": str(self.id),
@@ -90,8 +115,79 @@ class MessageDocument(Document):
             "to": self.to,
             "msg_type": self.msg_type,
             "media_url": self.media_url,
-            "meta_data": serialize_value(self.meta_data),
+            "meta_data": _serialize_api_value(self.meta_data),
         }
+
+    def _find_conversation_by_id(self):
+        """The conversation whose id is conversation_id; None when that id is not an ObjectId (legacy "online") or
+        the lookup fails.
+        """
+        conversation = None
+        try:
+            from bson import ObjectId
+
+            if ObjectId.is_valid(self.conversation_id):
+                conversation = Conversation.objects(id=self.conversation_id).first()
+        except Exception:
+            pass
+        return conversation
+
+    def _ensure_online_conversation(self):
+        """The customer's online conversation of this message's platform, created and saved when missing."""
+        conversation = Conversation.objects(
+            **build_online_conversation_filter(self.tenant_name, self.phone_number, self.platform)
+        ).first()
+        if not conversation:
+            conversation = Conversation(
+                tenant_name=self.tenant_name,
+                phone_number=self.phone_number,
+                platform=self.platform,
+                date=datetime.now(timezone.utc),
+                conversation_status="online",
+            )
+            conversation.save()
+        return conversation
+
+    def _refresh_last_message_date(self, conversation):
+        """Set the conversation's last_message_date to the date of its latest dated message; this message's date
+        when none has a date or on an error.
+        """
+        try:
+            # Sort messages by date and get the latest message date
+            # Build dated_messages list carefully to handle potential broken references
+            dated_messages = _collect_dated_messages(conversation)
+
+            if dated_messages:
+                conversation.last_message_date = sorted(
+                    dated_messages,
+                    key=lambda message_doc: message_doc.date.replace(tzinfo=None) if message_doc.date else datetime.min,
+                )[-1].date
+            else:
+                conversation.last_message_date = self.date
+        except Exception as error:
+            logger.error(f"Error sorting messages for conversation {conversation.id if conversation else 'unknown'}: {type(error).__name__}: {error}")
+            conversation.last_message_date = self.date
+
+    def _update_read_by_manager_flag(self, conversation):
+        """A customer message marks the conversation unread for the manager, a manager message marks it read."""
+        # Reset read_by_manager to False when a new customer message arrives
+        if self.role == "user":
+            conversation.read_by_manager = False
+        # Set read_by_manager to True when manager sends a message
+        elif self.role == "manager":
+            conversation.read_by_manager = True
+
+    def _append_to_conversation(self, conversation):
+        """Reference this stored message from the conversation, refresh its last message date and read flag, then
+        save the conversation (which broadcasts it over SSE) and reload it.
+        """
+        conversation.messages.append(self)
+        self._refresh_last_message_date(conversation)
+        self._update_read_by_manager_flag(conversation)
+
+        conversation.save()  # the conversation save broadcasts the update over SSE
+
+        conversation.reload()
 
     def save(self, *args, **kwargs):
         """Attach the message to the customer's online conversation of its platform (created when missing), then
@@ -99,65 +195,15 @@ class MessageDocument(Document):
         """
         self.date = self.date if self.date else datetime.now(timezone.utc)
 
-        conv = None
         if self.conversation_id:
-            try:
-                from bson import ObjectId
-
-                if ObjectId.is_valid(self.conversation_id):
-                    conv = Conversation.objects(id=self.conversation_id).first()
-            except Exception:
-                pass
+            conversation = self._find_conversation_by_id()
         else:
-            conv = Conversation.objects(
-                **online_conversation_filter(self.tenant_name, self.phone_number, self.platform)
-            ).first()
-            if not conv:
-                conv = Conversation(
-                    tenant_name=self.tenant_name,
-                    phone_number=self.phone_number,
-                    platform=self.platform,
-                    date=datetime.now(timezone.utc),
-                    conversation_status="online",
-                )
-                conv.save()
-            self.conversation_id = str(conv.id)
+            conversation = self._ensure_online_conversation()
+            self.conversation_id = str(conversation.id)
 
-        msg = super(MessageDocument, self).save(*args, **kwargs)
+        saved_message = super(MessageDocument, self).save(*args, **kwargs)
 
 
-        if conv and msg not in conv.messages:
-            conv.messages.append(self)
-            try:
-                # Sort messages by date and get the latest message date
-                # Build valid_messages list carefully to handle potential broken references
-                valid_messages = []
-                for idx, m in enumerate(conv.messages):
-                    try:
-                        # Try to access the date attribute - this will fail if the reference is broken
-                        if m is not None and hasattr(m, "date") and m.date is not None:
-                            valid_messages.append(m)
-                    except Exception as ref_err:
-                        logger.error(f"Warning: Skipping broken message reference at index {idx} in conversation {conv.id}: {type(ref_err).__name__}: {ref_err}")
-                        continue
-
-                if valid_messages:
-                    conv.last_message_date = sorted(
-                        valid_messages, key=lambda msg: msg.date.replace(tzinfo=None) if msg.date else datetime.min
-                    )[-1].date
-                else:
-                    conv.last_message_date = self.date
-            except Exception as e:
-                logger.error(f"Error sorting messages for conversation {conv.id if conv else 'unknown'}: {type(e).__name__}: {e}")
-                conv.last_message_date = self.date
-            # Reset read_by_manager to False when a new customer message arrives
-            if self.role == "user":
-                conv.read_by_manager = False
-            # Set read_by_manager to True when manager sends a message
-            elif self.role == "manager":
-                conv.read_by_manager = True
-
-            conv.save()  # the conversation save broadcasts the update over SSE
-
-            conv.reload()
+        if conversation and saved_message not in conversation.messages:
+            self._append_to_conversation(conversation)
         return self

@@ -36,9 +36,9 @@ class PasswordHistoryEntry(EmbeddedDocument):
     hash = StringField(required=True)
 
 
-ROLE_STAFF = "staff"
-ROLE_USER = "user"
-USER_ROLES = (ROLE_STAFF, ROLE_USER)
+STAFF_ROLE = "staff"
+TENANT_MEMBER_ROLE = "user"
+ALLOWED_USER_ROLES = (STAFF_ROLE, TENANT_MEMBER_ROLE)
 
 
 class UserDocument(Document):
@@ -50,7 +50,7 @@ class UserDocument(Document):
     is_staff = BooleanField(default=False)
     # "staff" = internal operator (full access), "user" = tenant member.
     # `is_staff` mirrors `role == "staff"` so JWT consumers and permission checks can test one boolean.
-    role = StringField(choices=USER_ROLES, default=ROLE_USER)
+    role = StringField(choices=ALLOWED_USER_ROLES, default=TENANT_MEMBER_ROLE)
     tenants_name = ListField(StringField())
     phone_number = StringField(required=False)
     color = StringField(default="#e5c7eb", description="Color associated with the user, used for UI purposes")
@@ -63,13 +63,32 @@ class UserDocument(Document):
 
     meta = {"collection": "users"}
 
+    def _build_full_access_permissions(self) -> Dict[str, List[str]]:
+        """Full access (grant_access + min_access) on every tenant of tenants_name, keyed by tenant name."""
+        return {member_tenant_name: ["grant_access", "min_access"] for member_tenant_name in self.tenants_name}
+
     def __init__(self, *args, **kwargs):
         """Default the permissions to full access on tenants_name, and promote is_staff=True to the staff role."""
         super().__init__(*args, **kwargs)
         if not self.permissions:
-            self.permissions = {tenant_name: ["grant_access", "min_access"] for tenant_name in self.tenants_name}
+            self.permissions = self._build_full_access_permissions()
         if kwargs.get("role") is None and kwargs.get("is_staff"):
-            self.role = ROLE_STAFF
+            self.role = STAFF_ROLE
+
+    def _normalize_email(self):
+        """Store the email stripped and lowercased (login and every lookup normalize to lowercase)."""
+        if self.email:
+            self.email = self.email.strip().lower()
+
+    def _reconcile_role_and_staff_flag(self):
+        """Reset an unknown role to the member role, promote a member carrying is_staff=True to staff, then derive
+        is_staff from the role (this order is load-bearing).
+        """
+        if self.role not in ALLOWED_USER_ROLES:
+            self.role = TENANT_MEMBER_ROLE
+        if self.is_staff and self.role == TENANT_MEMBER_ROLE:
+            self.role = STAFF_ROLE
+        self.is_staff = self.role == STAFF_ROLE
 
     def clean(self):
         """Keep `role` and the `is_staff` flag consistent.
@@ -80,13 +99,8 @@ class UserDocument(Document):
         Emails are stored lowercase: login and every lookup normalize to lowercase, so a
         mixed-case document would be unreachable (impossible login and password reset).
         """
-        if self.email:
-            self.email = self.email.strip().lower()
-        if self.role not in USER_ROLES:
-            self.role = ROLE_USER
-        if self.is_staff and self.role == ROLE_USER:
-            self.role = ROLE_STAFF
-        self.is_staff = self.role == ROLE_STAFF
+        self._normalize_email()
+        self._reconcile_role_and_staff_flag()
 
     meta = {"collection": "users"}
 
